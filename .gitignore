@@ -1,0 +1,26 @@
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Jupyter checkpoints
+.ipynb_checkpoints/
+
+# LaTeX build artifacts
+*.aux
+*.log
+*.out
+*.spl
+*.bbl
+*.blg
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Processed data (reproducible from raw via data_utils.py)
+data/processed/
+
+# Run logs (auto-generated, not meant to be tracked)
+*.log
+run_*.log
