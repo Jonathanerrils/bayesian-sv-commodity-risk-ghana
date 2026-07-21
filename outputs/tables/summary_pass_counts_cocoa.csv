@@ -1,0 +1,5 @@
+commodity,model,kupiec_passed,cc_passed,ind_passed,as_passed,total_tests
+cocoa,SV-Gaussian,1,1,1,2,8
+cocoa,SV-Leverage,1,0,1,2,8
+cocoa,SV-t,2,2,1,2,8
+cocoa,SV-t-Leverage,2,2,2,2,8

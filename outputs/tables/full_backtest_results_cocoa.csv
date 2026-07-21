@@ -1,0 +1,9 @@
+model,alpha,n_obs,n_violations,observed_rate,expected_rate,kupiec_lr,kupiec_p,kupiec_passed,cc_lr,cc_p,cc_passed,ind_lr,ind_p,ind_passed,as_z2,as_p,as_passed,as_interpretation,commodity
+SV-Gaussian,0.01,4123,63,0.0153,0.01,9.9964,0.0016,False,15.6197,0.0004,False,5.6234,0.0177,False,-0.7015,0.169,True,ES under-estimated (model under-forecasts tail risk),cocoa
+SV-Gaussian,0.05,4123,195,0.0473,0.05,0.646,0.4216,True,2.1732,0.3374,True,1.5272,0.2165,True,-0.0181,0.986,True,ES under-estimated (model under-forecasts tail risk),cocoa
+SV-t,0.01,4123,48,0.0116,0.01,1.0666,0.3017,True,3.3728,0.1852,True,2.3062,0.1289,True,-0.1455,0.996,True,ES under-estimated (model under-forecasts tail risk),cocoa
+SV-t,0.05,4123,198,0.048,0.05,0.3435,0.5578,True,4.4733,0.1068,True,4.1299,0.0421,False,0.012,1.0,True,ES over-estimated (model over-forecasts tail risk),cocoa
+SV-Leverage,0.01,4123,57,0.0138,0.01,5.4439,0.0196,False,6.7979,0.0334,False,1.354,0.2446,True,-0.5787,0.075,True,ES under-estimated (model under-forecasts tail risk),cocoa
+SV-Leverage,0.05,4123,190,0.0461,0.05,1.3661,0.2425,True,6.7668,0.0339,False,5.4007,0.0201,False,-0.0147,0.98,True,ES under-estimated (model under-forecasts tail risk),cocoa
+SV-t-Leverage,0.01,4123,36,0.0087,0.01,0.7001,0.4028,True,1.6697,0.4339,True,0.9696,0.3248,True,0.2352,1.0,True,ES over-estimated (model over-forecasts tail risk),cocoa
+SV-t-Leverage,0.05,4123,186,0.0451,0.05,2.1405,0.1435,True,2.9562,0.2281,True,0.8156,0.3665,True,0.1181,1.0,True,ES over-estimated (model over-forecasts tail risk),cocoa

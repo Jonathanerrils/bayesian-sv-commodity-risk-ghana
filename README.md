@@ -41,7 +41,9 @@ Full provenance for every series, including the specific data-quality issues fou
 
 ## Status of results in this repository
 
-Gold's four SV checkpoint files are included and complete. Cocoa's and oil's SV checkpoints were generated on a separate machine during the final production run and are not yet uploaded here — the paper's reported numbers for all three commodities are correct and verified, but the underlying checkpoint CSVs for cocoa and oil should be added as a follow-up commit for full reproducibility. The compiled backtest results tables (`full_backtest_results.csv`, `summary_pass_counts.csv`) are similarly pending upload.
+Gold's four SV checkpoint files (`checkpoints/`) are included and complete. Cocoa's and oil's per-day rolling forecast CSVs were generated on a separate machine and are not yet uploaded here — only their aggregated backtest results are (see below). The compiled backtest result tables for all three commodities, split by commodity since each was produced from a separate `--commodity X --sv-only` run, are in `outputs/tables/`. Note that a full 24-row, all-three-commodities, all-eight-models compilation has not yet been produced in one file; the paper's Table 1 and Table 2 were built by combining these three per-commodity files.
+
+A real correction worth noting explicitly: an earlier draft of this paper had several cells wrong in the summary table, including one case where the Kupiec and Christoffersen test results were reversed for oil's best-performing model. This was caught by cross-checking the paper's claims directly against these CSV files rather than against console output, and is exactly the kind of error this repository's structure is meant to make possible to catch.
 
 ## Six pre-committed robustness checks, not yet run
 

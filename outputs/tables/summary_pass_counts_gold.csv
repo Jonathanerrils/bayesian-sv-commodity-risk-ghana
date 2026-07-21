@@ -1,0 +1,5 @@
+commodity,model,kupiec_passed,cc_passed,ind_passed,as_passed,total_tests
+gold,SV-Gaussian,1,1,1,2,8
+gold,SV-Leverage,1,1,2,2,8
+gold,SV-t,2,2,1,2,8
+gold,SV-t-Leverage,2,2,2,2,8

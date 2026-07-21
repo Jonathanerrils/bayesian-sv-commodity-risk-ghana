@@ -1,0 +1,9 @@
+model,alpha,n_obs,n_violations,observed_rate,expected_rate,kupiec_lr,kupiec_p,kupiec_passed,cc_lr,cc_p,cc_passed,ind_lr,ind_p,ind_passed,as_z2,as_p,as_passed,as_interpretation,commodity
+SV-Gaussian,0.01,4806,78,0.0162,0.01,15.8531,0.0001,False,17.6407,0.0001,False,1.7876,0.1812,True,-0.858,0.057,True,ES under-estimated (model under-forecasts tail risk),oil
+SV-Gaussian,0.05,4806,252,0.0524,0.05,0.5906,0.4422,True,3.1071,0.2115,True,2.5164,0.1127,True,-0.108,0.74,True,ES under-estimated (model under-forecasts tail risk),oil
+SV-t,0.01,4806,75,0.0156,0.01,13.0285,0.0003,False,17.4211,0.0002,False,4.3926,0.0361,False,-0.6897,0.612,True,ES under-estimated (model under-forecasts tail risk),oil
+SV-t,0.05,4806,260,0.0541,0.05,1.6577,0.1979,True,7.0813,0.029,False,5.4236,0.0199,False,-0.1247,0.976,True,ES under-estimated (model under-forecasts tail risk),oil
+SV-Leverage,0.01,4806,71,0.0148,0.01,9.6434,0.0019,False,17.8148,0.0001,False,8.1714,0.0043,False,-0.7856,0.003,False,ES under-estimated (model under-forecasts tail risk),oil
+SV-Leverage,0.05,4806,249,0.0518,0.05,0.3278,0.5669,True,2.346,0.3094,True,2.0181,0.1554,True,-0.1021,0.817,True,ES under-estimated (model under-forecasts tail risk),oil
+SV-t-Leverage,0.01,4806,59,0.0123,0.01,2.3455,0.1256,True,6.5012,0.0388,False,4.1558,0.0415,False,-0.3433,1.0,True,ES under-estimated (model under-forecasts tail risk),oil
+SV-t-Leverage,0.05,4806,236,0.0491,0.05,0.0815,0.7753,True,1.1047,0.5756,True,1.0232,0.3118,True,0.0201,1.0,True,ES over-estimated (model over-forecasts tail risk),oil

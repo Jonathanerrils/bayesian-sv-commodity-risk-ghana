@@ -1,0 +1,9 @@
+model,alpha,n_obs,n_violations,observed_rate,expected_rate,kupiec_lr,kupiec_p,kupiec_passed,cc_lr,cc_p,cc_passed,ind_lr,ind_p,ind_passed,as_z2,as_p,as_passed,as_interpretation,commodity
+SV-Gaussian,0.01,4893,74,0.0151,0.01,11.2138,0.0008,False,15.8732,0.0004,False,4.6594,0.0309,False,-0.5488,0.623,True,ES under-estimated (model under-forecasts tail risk),gold
+SV-Gaussian,0.05,4893,246,0.0503,0.05,0.0078,0.9295,True,2.5317,0.282,True,2.5238,0.1121,True,-0.0321,1.0,True,ES under-estimated (model under-forecasts tail risk),gold
+SV-t,0.01,4893,53,0.0108,0.01,0.3329,0.5639,True,5.6309,0.0599,True,5.298,0.0214,False,-0.0534,1.0,True,ES under-estimated (model under-forecasts tail risk),gold
+SV-t,0.05,4893,248,0.0507,0.05,0.0481,0.8264,True,1.6231,0.4442,True,1.575,0.2095,True,0.0122,1.0,True,ES over-estimated (model over-forecasts tail risk),gold
+SV-Leverage,0.01,4893,67,0.0137,0.01,6.0439,0.014,False,9.1202,0.0105,False,3.0763,0.0794,True,-0.4463,0.904,True,ES under-estimated (model under-forecasts tail risk),gold
+SV-Leverage,0.05,4893,236,0.0482,0.05,0.3256,0.5683,True,0.5684,0.7526,True,0.2428,0.6222,True,-0.0091,1.0,True,ES under-estimated (model under-forecasts tail risk),gold
+SV-t-Leverage,0.01,4893,49,0.01,0.01,0.0001,0.992,True,2.6965,0.2597,True,2.6964,0.1006,True,-0.0064,1.0,True,ES under-estimated (model under-forecasts tail risk),gold
+SV-t-Leverage,0.05,4893,245,0.0501,0.05,0.0005,0.9817,True,0.6333,0.7286,True,0.6328,0.4263,True,0.0411,1.0,True,ES over-estimated (model over-forecasts tail risk),gold

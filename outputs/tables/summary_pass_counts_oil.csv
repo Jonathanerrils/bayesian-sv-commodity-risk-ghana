@@ -1,0 +1,5 @@
+commodity,model,kupiec_passed,cc_passed,ind_passed,as_passed,total_tests
+oil,SV-Gaussian,1,1,2,2,8
+oil,SV-Leverage,1,1,1,1,8
+oil,SV-t,1,0,0,2,8
+oil,SV-t-Leverage,2,1,1,2,8

@@ -856,7 +856,7 @@ Commodity & Model & $N$ & $T$ & $\hat{p}$ &
   & HS         & 68  & 4123 & 0.016 & F & F & P & F & F & P \\
   & SV-G       & 63  & 4123 & 0.015 & F & F & P & P & P & P \\
   & \textbf{SV-$t$}     & \textbf{48}  & 4123 & 0.012 & P & P & P & P & P & P \\
-  & SV-L       & 57  & 4123 & 0.014 & F & F & P & P & P & P \\
+  & SV-L       & 57  & 4123 & 0.014 & F & F & P & P & F & P \\
   & \textbf{SV-$t$L}& \textbf{36} & 4123 & 0.009 & P & P & P & P & P & P \\
 \midrule
 \multirow{8}{*}{\textbf{Gold}}
@@ -875,9 +875,9 @@ Commodity & Model & $N$ & $T$ & $\hat{p}$ &
   & OU         & 62  & 4560 & 0.014 & F & F & F & F & F & P \\
   & HS         & 74  & 4806 & 0.015 & F & F & P & P & F & P \\
   & SV-G       & 78  & 4806 & 0.016 & F & F & P & P & P & P \\
-  & SV-$t$     & 75  & 4806 & 0.016 & F & F & P & P & P & P \\
+  & SV-$t$     & 75  & 4806 & 0.016 & F & F & P & P & F & P \\
   & SV-L       & 71  & 4806 & 0.015 & F & P & F & P & P & P \\
-  & \textbf{SV-$t$L}    & \textbf{59}  & 4806 & 0.012 & F & P & P & P & P & P \\
+  & \textbf{SV-$t$L}    & \textbf{59}  & 4806 & 0.012 & P & F & P & P & P & P \\
 \bottomrule
 \end{tabular}
 \vspace{4pt}
@@ -903,8 +903,8 @@ EGARCH(1,1)     & 2 & 4 & 2 & \phantom{0}8 \\
 OU              & 3 & 2 & 1 & \phantom{0}6 \\
 Historical Simulation & 2 & 5 & 3 & 10 \\
 SV-Gaussian     & 4 & 4 & 4 & 12 \\
-\textbf{SV-$t$} & \textbf{6} & \textbf{6} & 4 & 16 \\
-SV-Leverage     & 4 & 4 & 4 & 12 \\
+\textbf{SV-$t$} & \textbf{6} & \textbf{6} & 3 & 15 \\
+SV-Leverage     & 3 & 4 & 3 & 10 \\
 \textbf{SV-$t$-Leverage} & \textbf{6} & \textbf{6} & \textbf{5} & \textbf{17} \\
 \bottomrule
 \end{tabular}
@@ -931,7 +931,9 @@ The gold result is, in one sense, simpler than cocoa's: adding the leverage chan
 \subsection{Oil}
 \label{sec:results_oil}
 
-Oil is where this study's results depart most sharply from a tidy narrative, and we report this plainly rather than around it. Every single model we estimate --- all four benchmarks and all four primary SV specifications --- fails the 99\% VaR Kupiec test for oil. GARCH produces 80 violations against an expected 48, EGARCH 86, the OU benchmark 62 (on 4,560 converged windows, and the only benchmark-commodity combination in this entire study to also fail at 95\% VaR, on both Kupiec and Christoffersen), and Historical Simulation 74. Among the primary models, SV-Gaussian produces 78 violations and SV-$t$ 75 --- both higher than the benchmarks' typical range, indicating that the Student-$t$ innovation that resolved 99\% VaR adequacy for both cocoa and gold does not do so for oil at the same confidence level --- and SV-Leverage 71. SV-$t$-Leverage comes closest, with 59 violations against 48 expected, the smallest overshoot among any oil model sharing the same $T=4806$ observation count. It passes both the Christoffersen independence component and the Acerbi--Sz\'ekely ES test at 99\%, and its Kupiec statistic, while still a fail, is a materially less marginal one than in our earlier specification ($p=0.126$): the model is failing on unconditional coverage specifically --- too many violations overall --- rather than failing broadly across every criterion.
+Oil is where this study's results depart most sharply from a tidy narrative, and we report this plainly rather than around it. Every model we estimate except one fails the 99\% VaR Kupiec test for oil. GARCH produces 80 violations against an expected 48, EGARCH 86, the OU benchmark 62 (on 4,560 converged windows, and the only benchmark-commodity combination in this entire study to also fail at 95\% VaR, on both Kupiec and Christoffersen), and Historical Simulation 74. Among the primary models, SV-Gaussian produces 78 violations and SV-$t$ 75 --- both higher than the benchmarks' typical range, and SV-$t$ additionally fails the Christoffersen test at 95\% VaR, indicating that the Student-$t$ innovation that resolved 99\% VaR adequacy for both cocoa and gold does not do so for oil at the same confidence level --- while SV-Leverage produces 71 violations and fails all three 99\% tests outright, the only model-commodity combination in this study to do so.
+
+SV-$t$-Leverage is the exception, and the way it is an exception is itself informative. With 59 violations against 48 expected --- the smallest overshoot among any oil model sharing the same $T=4806$ observation count --- it \emph{passes} the Kupiec test at 99\% ($p=0.126$): the overall frequency of extreme losses is correctly calibrated. What fails is the Christoffersen conditional coverage test ($p=0.039$), driven specifically by its independence component ($p=0.042$): violations are correctly frequent in aggregate, but they cluster in time rather than occurring independently. This is a materially different and, we think, more practically consequential failure mode than a simple frequency miscalibration. A risk model whose tail losses are correctly rare on average but arrive in clusters is failing exactly when clustering matters most --- during the crisis episodes, such as the COVID-19 collapse or the 2026 Middle East-driven shock, that this paper's own crisis-period analysis in Section~\ref{sec:stylised} identifies as the source of oil's extreme kurtosis in the first place.
 
 We do not read this as a failure of the modelling exercise. It is, instead, the clearest single finding in this study about the limits of what a smooth parametric innovation distribution --- however heavy-tailed --- can be asked to represent. Section~\ref{sec:stylised} established that oil's excess kurtosis over our full sample is 82.6, an order of magnitude beyond gold's 6.6 and roughly ten times cocoa's 8.5, and traced this directly to a small number of extraordinary episodes: the COVID-19 demand collapse and the associated negative-price event of April 2020, and the supply disruption following the February 2026 Middle East conflict. A Student-$t$ distribution, whatever degrees-of-freedom parameter the data implies, is still a single smooth family of curves; it is not obviously suited to representing a return distribution whose extremity is concentrated in a handful of qualitatively distinct crisis episodes rather than distributed smoothly across the whole sample.
 
