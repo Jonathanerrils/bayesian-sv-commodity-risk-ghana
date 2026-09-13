@@ -1,20 +1,8 @@
 """Empirical validity pilot for the repaired v2 forecasting pipeline.
 
 This is deliberately small enough for CI. It is not a substitute for the
-production W=1000 experiment. The purpose is to verify on committed real data
-that:
-
-* an actual Student-t SV posterior converges under the candidate rolling MCMC
-  settings;
-* leverage-aware SV forecasting also runs on real data;
-* the latent state changes after conditioning on newly observed returns;
-* particle-filter ESS remains observable/non-degenerate;
-* VaR/ES are finite and ES is at least VaR;
-* the repaired forecasts no longer exhibit the legacy mechanically flat blocks;
-* Student-t GARCH and asymmetric Student-t EGARCH benchmarks run on the same
-  pilot dates.
-
-Artifacts are written to ``pilot_artifacts/`` for CI inspection.
+production W=1000 experiment. The pilot validates both forecast mechanics and
+the candidate adaptive rolling-MCMC policy on committed real data.
 """
 
 from __future__ import annotations
@@ -47,18 +35,18 @@ FORECAST_DAYS = 20
 N_PREDICTIVE = 5_000
 ALPHAS = (0.01, 0.05)
 BASE_SEED = 20_260_913
-
-# The empirical sequence is intentional:
-#   1 chain x 500: poor ESS (SV-t ~77.6, SV-t-Leverage ~32.8)
-#   2 chains x 500: SV-t R-hat ~1.0095 / ESS ~138.7;
-#                   leverage R-hat ~1.0237 / ESS ~82.4.
-# PyMC also explicitly recommends at least four chains for robust convergence
-# diagnostics. This candidate therefore uses four chains and increases both
-# warmup and retained draws rather than weakening the diagnostic thresholds.
-MCMC_CHAINS = 4
-MCMC_TUNE = 1_000
-MCMC_DRAWS = 1_000
 TARGET_ACCEPT = 0.95
+
+# Empirically selected candidate policy:
+# * 1x500 and 2x500 were inadequate.
+# * 4x1000 passes SV-t but the leverage variant narrowly misses the strict
+#   R-hat/ESS gate because of mu/phi mixing.
+# * Rather than weakening diagnostics or forcing every refit to the most
+#   expensive setting, retry only failed refits at 4x2000.
+MCMC_ATTEMPTS = (
+    {"chains": 4, "tune": 1_000, "draws": 1_000},
+    {"chains": 4, "tune": 2_000, "draws": 2_000},
+)
 
 
 def _max_equal_run(values, decimals: int = 8) -> int:
@@ -98,13 +86,45 @@ def _scalar_diagnostics(trace) -> dict:
     ess = az.ess(trace, var_names=scalar_vars)
     diagnostics = {}
     for name in scalar_vars:
-        rhat_vals = np.asarray(rhat[name].values, dtype=float)
-        ess_vals = np.asarray(ess[name].values, dtype=float)
         diagnostics[name] = {
-            "max_rhat": float(np.nanmax(rhat_vals)),
-            "min_ess": float(np.nanmin(ess_vals)),
+            "max_rhat": float(np.nanmax(np.asarray(rhat[name].values, dtype=float))),
+            "min_ess": float(np.nanmin(np.asarray(ess[name].values, dtype=float))),
         }
     return diagnostics
+
+
+def _fit_adaptive(train: np.ndarray, variant: str, seed_offset: int) -> tuple[dict, list]:
+    attempts = []
+    final_fit = None
+    for attempt_no, cfg in enumerate(MCMC_ATTEMPTS, start=1):
+        fit = fit_sv(
+            train,
+            variant=variant,
+            chains=cfg["chains"],
+            draws=cfg["draws"],
+            tune=cfg["tune"],
+            fast_mode=False,
+            target_accept=TARGET_ACCEPT,
+            random_seed=BASE_SEED + seed_offset + attempt_no - 1,
+        )
+        record = {
+            "attempt": attempt_no,
+            **cfg,
+            "converged": bool(fit.get("converged", False)),
+            "max_rhat": float(fit.get("max_rhat", np.nan)),
+            "min_ess": float(fit.get("min_ess", np.nan)),
+            "n_divergences": int(fit.get("n_divergences", -1))
+            if np.isfinite(fit.get("n_divergences", np.nan))
+            else None,
+            "error": fit.get("error"),
+        }
+        if fit.get("trace") is not None:
+            record["scalar_diagnostics"] = _scalar_diagnostics(fit["trace"])
+        attempts.append(record)
+        final_fit = fit
+        if fit.get("converged", False):
+            break
+    return final_fit, attempts
 
 
 def _run_sv_variant(
@@ -114,17 +134,7 @@ def _run_sv_variant(
 ) -> tuple[pd.DataFrame, dict]:
     train = sample.iloc[:WINDOW].to_numpy(dtype=float)
     test = sample.iloc[WINDOW:]
-
-    fit = fit_sv(
-        train,
-        variant=variant,
-        chains=MCMC_CHAINS,
-        draws=MCMC_DRAWS,
-        tune=MCMC_TUNE,
-        fast_mode=False,
-        target_accept=TARGET_ACCEPT,
-        random_seed=BASE_SEED + seed_offset,
-    )
+    fit, attempts = _fit_adaptive(train, variant, seed_offset)
 
     fit_summary = {
         "converged": bool(fit.get("converged", False)),
@@ -135,6 +145,10 @@ def _run_sv_variant(
         else None,
         "trace_available": fit.get("trace") is not None,
         "error": fit.get("error"),
+        "mcmc_attempts": attempts,
+        "accepted_attempt": next(
+            (a["attempt"] for a in attempts if a["converged"]), None
+        ),
     }
     if fit.get("trace") is None:
         return pd.DataFrame(), fit_summary
@@ -191,7 +205,6 @@ def _run_sv_variant(
         "max_equal_var_1pct_run_rounded_8dp": _max_equal_run(var1),
         "legacy_comparison": _legacy_flatness(variant, df.index),
     }
-
     summary["pilot_pass"] = bool(
         summary["converged"]
         and summary["n_divergences"] == 0
@@ -234,9 +247,6 @@ def _run_benchmarks(sample: pd.Series) -> dict:
                 and (valid["es_0.05"] >= valid["var_0.05"]).all()
             ),
         }
-        # A single short-window stationarity rejection is recorded as a warning,
-        # not a pipeline failure. Production comparison will use common valid
-        # dates so unavailable forecasts never get silently dropped model-wise.
         out[label]["pilot_pass"] = bool(
             out[label]["failure_rate"] <= 0.05
             and out[label]["finite_forecasts"]
@@ -257,12 +267,8 @@ def main() -> None:
         "window": WINDOW,
         "forecast_days": FORECAST_DAYS,
         "n_predictive": N_PREDICTIVE,
-        "mcmc": {
-            "chains": MCMC_CHAINS,
-            "tune": MCMC_TUNE,
-            "draws": MCMC_DRAWS,
-            "target_accept": TARGET_ACCEPT,
-        },
+        "mcmc_attempt_policy": list(MCMC_ATTEMPTS),
+        "target_accept": TARGET_ACCEPT,
         "sample_start": sample.index.min().isoformat(),
         "sample_end": sample.index.max().isoformat(),
         "models": {},
