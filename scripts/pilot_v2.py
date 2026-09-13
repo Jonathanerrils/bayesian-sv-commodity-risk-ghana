@@ -23,6 +23,7 @@ import json
 import sys
 from pathlib import Path
 
+import arviz as az
 import numpy as np
 import pandas as pd
 
@@ -47,12 +48,16 @@ N_PREDICTIVE = 5_000
 ALPHAS = (0.01, 0.05)
 BASE_SEED = 20_260_913
 
-# Candidate production refit configuration. The first empirical pilot showed
-# that the legacy rolling choice (1 chain, 500 tune, 500 draws) had min ESS of
-# only 77.6 for SV-t and 32.8 for SV-t-Leverage on this real-data window.
-MCMC_CHAINS = 2
-MCMC_TUNE = 500
-MCMC_DRAWS = 500
+# The empirical sequence is intentional:
+#   1 chain x 500: poor ESS (SV-t ~77.6, SV-t-Leverage ~32.8)
+#   2 chains x 500: SV-t R-hat ~1.0095 / ESS ~138.7;
+#                   leverage R-hat ~1.0237 / ESS ~82.4.
+# PyMC also explicitly recommends at least four chains for robust convergence
+# diagnostics. This candidate therefore uses four chains and increases both
+# warmup and retained draws rather than weakening the diagnostic thresholds.
+MCMC_CHAINS = 4
+MCMC_TUNE = 1_000
+MCMC_DRAWS = 1_000
 TARGET_ACCEPT = 0.95
 
 
@@ -87,6 +92,21 @@ def _legacy_flatness(variant: str, dates: pd.DatetimeIndex) -> dict:
     }
 
 
+def _scalar_diagnostics(trace) -> dict:
+    scalar_vars = [v for v in trace.posterior.data_vars if v not in ("h", "z")]
+    rhat = az.rhat(trace, var_names=scalar_vars)
+    ess = az.ess(trace, var_names=scalar_vars)
+    diagnostics = {}
+    for name in scalar_vars:
+        rhat_vals = np.asarray(rhat[name].values, dtype=float)
+        ess_vals = np.asarray(ess[name].values, dtype=float)
+        diagnostics[name] = {
+            "max_rhat": float(np.nanmax(rhat_vals)),
+            "min_ess": float(np.nanmin(ess_vals)),
+        }
+    return diagnostics
+
+
 def _run_sv_variant(
     sample: pd.Series,
     variant: str,
@@ -119,6 +139,7 @@ def _run_sv_variant(
     if fit.get("trace") is None:
         return pd.DataFrame(), fit_summary
 
+    fit_summary["scalar_diagnostics"] = _scalar_diagnostics(fit["trace"])
     state = initialize_filter_state(fit)
     rows = []
     for j, (date, actual) in enumerate(test.items()):
