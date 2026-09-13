@@ -1,9 +1,8 @@
 name: empirical-pilot
 
 on:
-  push:
-    branches: ["audit-fix/**"]
   pull_request:
+  workflow_dispatch:
 
 jobs:
   pilot:
