@@ -6,7 +6,9 @@ The rolling implementation deliberately separates two operations:
 * the latent volatility state is filtered after every realised return.
 
 This avoids stale 42-day forecast blocks while retaining the computational
-benefit of infrequent MCMC refits.
+benefit of infrequent MCMC refits. Rolling MCMC itself is adaptive: each refit
+starts with the empirically validated 4-chain / 1,000-draw configuration and is
+retried at 4 chains / 2,000 draws only when the strict convergence gate fails.
 """
 
 from __future__ import annotations
@@ -25,7 +27,11 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 
 RHAT_THRESHOLD = 1.01
 FAST_MIN_ESS = 200
-MODEL_VERSION = "sv-filter-v2"
+MODEL_VERSION = "sv-filter-v2-adaptive-mcmc"
+DEFAULT_ROLLING_MCMC_ATTEMPTS = (
+    {"chains": 4, "tune": 1_000, "draws": 1_000},
+    {"chains": 4, "tune": 2_000, "draws": 2_000},
+)
 
 
 def _nu_prior(name: str = "nu"):
@@ -221,6 +227,9 @@ def fit_sv(
             "T": len(returns),
             "mean_return": mean_return,
             "model_version": MODEL_VERSION,
+            "chains": chains,
+            "draws": draws,
+            "tune": tune,
         }
     except Exception as exc:
         return {
@@ -233,8 +242,63 @@ def fit_sv(
             "T": len(returns),
             "mean_return": mean_return,
             "model_version": MODEL_VERSION,
+            "chains": chains,
+            "draws": draws,
+            "tune": tune,
             "error": str(exc),
         }
+
+
+def fit_sv_adaptive(
+    returns: np.ndarray,
+    variant: str = "SV-t",
+    target_accept: float = 0.95,
+    random_seed: int = 42,
+    attempts=None,
+) -> dict:
+    """Fit a rolling SV refit using a strict, empirically validated escalation.
+
+    The default policy was validated on the real gold pilot: 4x1000 cleared the
+    strict R-hat/ESS gate for SV-t, while SV-t-Leverage required escalation to
+    4x2000. A failed first attempt is never used for forecasting.
+    """
+    if attempts is None:
+        attempts = DEFAULT_ROLLING_MCMC_ATTEMPTS
+
+    records = []
+    final_fit = None
+    for attempt_no, cfg in enumerate(attempts, start=1):
+        fit = fit_sv(
+            returns,
+            variant=variant,
+            chains=int(cfg["chains"]),
+            draws=int(cfg["draws"]),
+            tune=int(cfg["tune"]),
+            target_accept=target_accept,
+            random_seed=random_seed + attempt_no - 1,
+            fast_mode=False,
+        )
+        records.append({
+            "attempt": attempt_no,
+            "chains": int(cfg["chains"]),
+            "draws": int(cfg["draws"]),
+            "tune": int(cfg["tune"]),
+            "converged": bool(fit.get("converged", False)),
+            "max_rhat": fit.get("max_rhat", np.nan),
+            "min_ess": fit.get("min_ess", np.nan),
+            "n_divergences": fit.get("n_divergences", np.nan),
+            "error": fit.get("error"),
+        })
+        final_fit = fit
+        if fit.get("converged", False):
+            break
+
+    final_fit = dict(final_fit)
+    final_fit["mcmc_attempts"] = records
+    final_fit["accepted_attempt"] = next(
+        (r["attempt"] for r in records if r["converged"]), None
+    )
+    return final_fit
 
 
 def initialize_filter_state(fit_result: dict) -> dict:
@@ -420,14 +484,17 @@ def rolling_sv_var_es(
     checkpoint_every: int = 50,
     n_predictive: int = 20_000,
     random_seed: int = 42,
+    mcmc_attempts=None,
 ) -> pd.DataFrame:
-    """Adaptive walk-forward VaR/ES with MCMC refits and daily state filtering."""
+    """Adaptive walk-forward VaR/ES with strict MCMC refits and daily filtering."""
     if alphas is None:
         alphas = [0.01, 0.05]
     if variant not in MODEL_BUILDERS:
         raise ValueError(f"Unknown variant: {variant}")
     if len(returns) <= window:
         raise ValueError("Series length must exceed rolling window")
+    if mcmc_attempts is None:
+        mcmc_attempts = DEFAULT_ROLLING_MCMC_ATTEMPTS
 
     ret_array = returns.to_numpy(dtype=float)
     dates = returns.index
@@ -473,14 +540,16 @@ def rolling_sv_var_es(
         }
 
         if filter_state is None or (i - last_fit_idx) >= refit_every:
-            fit = fit_sv(
+            fit = fit_sv_adaptive(
                 train,
                 variant=variant,
-                fast_mode=True,
                 target_accept=target_accept,
                 random_seed=random_seed + i,
+                attempts=mcmc_attempts,
             )
             row["refit"] = True
+            row["mcmc_attempt"] = fit.get("accepted_attempt", np.nan)
+            row["mcmc_max_rhat"] = fit.get("max_rhat", np.nan)
             row["mcmc_min_ess"] = fit.get("min_ess", np.nan)
             row["mcmc_divergences"] = fit.get("n_divergences", np.nan)
             if not fit.get("converged", False):
@@ -527,5 +596,5 @@ def rolling_sv_var_es(
             _save_filter_state(sidecar, filter_state, n_forecasts, last_fit_idx)
 
     if n_failures:
-        print(f"WARNING [{variant}]: {n_failures} failed MCMC refits")
+        print(f"WARNING [{variant}]: {n_failures} failed MCMC refits after escalation")
     return df
