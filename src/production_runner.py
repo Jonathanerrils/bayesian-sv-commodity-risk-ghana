@@ -4,6 +4,8 @@ Validity repair v2:
 * CLI window/refit settings are threaded into every model call.
 * checkpoints are configuration-scoped and cannot silently reuse legacy v1 CSVs.
 * SV forecasts use daily latent-state filtering between MCMC parameter refits.
+* GARCH-family benchmarks cross Gaussian/Student-t innovations with symmetric
+  GARCH and asymmetric EGARCH dynamics.
 """
 
 from __future__ import annotations
@@ -33,7 +35,13 @@ CHECKPOINT_ROOT = PROJECT_ROOT / "checkpoints" / "v2"
 ALPHAS = [0.01, 0.05]
 COMMODITIES = ["cocoa", "gold", "oil"]
 SV_VARIANTS = ["SV-Gaussian", "SV-t", "SV-Leverage", "SV-t-Leverage"]
-BENCHMARK_MODELS = ["GARCH", "EGARCH", "OU", "HistSim"]
+GARCH_BENCHMARK_SPECS = {
+    "GARCH": ("GARCH", "normal"),
+    "GARCH-t": ("GARCH", "t"),
+    "EGARCH": ("EGARCH", "normal"),
+    "EGARCH-t": ("EGARCH", "t"),
+}
+BENCHMARK_MODELS = [*GARCH_BENCHMARK_SPECS, "OU", "HistSim"]
 
 
 def setup_logging(path: Path) -> logging.Logger:
@@ -95,10 +103,15 @@ def run_benchmark(
         logger.warning("[STALE] %s has wrong row count; recomputing", path)
 
     t0 = time.time()
-    if model == "GARCH":
-        df = rolling_var_es(returns, "GARCH", window=window, alphas=ALPHAS)
-    elif model == "EGARCH":
-        df = rolling_var_es(returns, "EGARCH", window=window, alphas=ALPHAS)
+    if model in GARCH_BENCHMARK_SPECS:
+        model_type, distribution = GARCH_BENCHMARK_SPECS[model]
+        df = rolling_var_es(
+            returns,
+            model_type=model_type,
+            distribution=distribution,
+            window=window,
+            alphas=ALPHAS,
+        )
     elif model == "HistSim":
         df = historical_simulation_var_es(returns, window=window, alphas=ALPHAS)
     elif model == "OU":
