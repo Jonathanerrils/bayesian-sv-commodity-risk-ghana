@@ -4,8 +4,11 @@ Validity repair v2:
 * CLI window/refit settings are threaded into every model call.
 * checkpoints are configuration-scoped and cannot silently reuse legacy v1 CSVs.
 * SV forecasts use daily latent-state filtering between MCMC parameter refits.
+* rolling SV refits use a strict adaptive MCMC convergence policy.
 * GARCH-family benchmarks cross Gaussian/Student-t innovations with symmetric
   GARCH and asymmetric EGARCH dynamics.
+* primary model comparisons use the same valid forecast dates for every model
+  within a commodity; native-sample diagnostics are retained separately.
 """
 
 from __future__ import annotations
@@ -17,6 +20,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -25,7 +29,11 @@ from backtests import run_all_backtests
 from data_utils import load_all_prices, load_all_returns
 from garch_model import historical_simulation_var_es, rolling_var_es
 from ou_model import rolling_ou_var_es
-from sv_model import MODEL_VERSION, rolling_sv_var_es
+from sv_model import (
+    DEFAULT_ROLLING_MCMC_ATTEMPTS,
+    MODEL_VERSION,
+    rolling_sv_var_es,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 RESULTS_DIR = PROJECT_ROOT / "outputs" / "v2"
@@ -57,9 +65,19 @@ def setup_logging(path: Path) -> logging.Logger:
     return logger
 
 
+def mcmc_policy_label(attempts=None) -> str:
+    """Compact deterministic label for the rolling MCMC escalation policy."""
+    if attempts is None:
+        attempts = DEFAULT_ROLLING_MCMC_ATTEMPTS
+    return "-then-".join(
+        f"{int(a['chains'])}c{int(a['tune'])}t{int(a['draws'])}d"
+        for a in attempts
+    )
+
+
 def run_key(window: int, refit_every: int, predictive_draws: int) -> str:
     return (
-        f"{MODEL_VERSION}_w{window}_r{refit_every}_p{predictive_draws}"
+        f"{MODEL_VERSION}_{mcmc_policy_label()}_w{window}_r{refit_every}_p{predictive_draws}"
         .replace("/", "-")
         .replace(" ", "-")
     )
@@ -159,6 +177,7 @@ def run_sv(
         checkpoint_path=path,
         checkpoint_every=50,
         n_predictive=predictive_draws,
+        mcmc_attempts=DEFAULT_ROLLING_MCMC_ATTEMPTS,
     )
     logger.info(
         "[DONE] %s/%s: %d forecasts in %.1f min",
@@ -170,6 +189,78 @@ def run_sv(
     return df
 
 
+def _valid_forecast_mask(fc: pd.DataFrame, alphas=None) -> pd.Series:
+    """Rows eligible for fair primary comparison for one model."""
+    if alphas is None:
+        alphas = ALPHAS
+    mask = pd.Series(True, index=fc.index, dtype=bool)
+    required = ["actual_return"]
+    for alpha in alphas:
+        required.extend([f"var_{alpha}", f"es_{alpha}"])
+    for col in required:
+        if col not in fc:
+            return pd.Series(False, index=fc.index, dtype=bool)
+        mask &= np.isfinite(pd.to_numeric(fc[col], errors="coerce"))
+    if "estimation_failed" in fc:
+        failed = fc["estimation_failed"].fillna(True).astype(bool)
+        mask &= ~failed
+    return mask
+
+
+def common_valid_dates(forecasts: dict, commodity: str) -> pd.DatetimeIndex:
+    """Intersection of valid forecast dates across all models for a commodity."""
+    model_frames = [
+        fc for (comm, _model), fc in forecasts.items() if comm == commodity
+    ]
+    if not model_frames:
+        return pd.DatetimeIndex([])
+
+    common = None
+    for fc in model_frames:
+        valid_idx = pd.DatetimeIndex(fc.index[_valid_forecast_mask(fc)])
+        common = valid_idx if common is None else common.intersection(valid_idx)
+    return pd.DatetimeIndex(common).sort_values()
+
+
+def _backtest_rows(
+    forecasts: dict,
+    window: int,
+    refit_every: int,
+    predictive_draws: int,
+    common_dates: bool,
+) -> pd.DataFrame:
+    rows = []
+    date_cache = {
+        commodity: common_valid_dates(forecasts, commodity)
+        for commodity in sorted({c for c, _m in forecasts})
+    }
+    for (commodity, model), fc in forecasts.items():
+        used = fc.loc[date_cache[commodity]] if common_dates else fc
+        bt = run_all_backtests(used, ALPHAS, label=f"{commodity}/{model}")
+        bt["commodity"] = commodity
+        bt["model"] = model
+        bt["sample"] = "common_dates" if common_dates else "native"
+        bt["window"] = window
+        bt["refit_every"] = refit_every if model in SV_VARIANTS else 1
+        bt["predictive_draws"] = predictive_draws if model in SV_VARIANTS else 0
+        bt["model_version"] = MODEL_VERSION
+        bt["mcmc_policy"] = mcmc_policy_label() if model in SV_VARIANTS else "n/a"
+        rows.append(bt)
+    return pd.concat(rows, ignore_index=True)
+
+
+def _summary_table(results: pd.DataFrame) -> pd.DataFrame:
+    grouped = results.groupby(["commodity", "model"], sort=True)
+    summary = grouped[["kupiec_passed", "cc_passed", "as_passed"]].sum()
+    summary["primary_tests_passed"] = summary.sum(axis=1)
+    summary["primary_tests_total"] = grouped.size() * 3
+    summary["independence_passed"] = grouped["ind_passed"].sum()
+    summary["independence_total"] = grouped.size()
+    summary["n_obs_min"] = grouped["n_obs"].min()
+    summary["n_obs_max"] = grouped["n_obs"].max()
+    return summary.reset_index()
+
+
 def compile_results(
     forecasts: dict,
     window: int,
@@ -177,34 +268,45 @@ def compile_results(
     predictive_draws: int,
     logger: logging.Logger,
 ) -> pd.DataFrame:
-    rows = []
-    for (commodity, model), fc in forecasts.items():
-        bt = run_all_backtests(fc, ALPHAS, label=f"{commodity}/{model}")
-        bt["commodity"] = commodity
-        bt["model"] = model
-        bt["window"] = window
-        bt["refit_every"] = refit_every if model in SV_VARIANTS else 1
-        bt["predictive_draws"] = predictive_draws if model in SV_VARIANTS else 0
-        bt["model_version"] = MODEL_VERSION
-        rows.append(bt)
-
-    results = pd.concat(rows, ignore_index=True)
     out_dir = TABLES_DIR / run_key(window, refit_every, predictive_draws)
     out_dir.mkdir(parents=True, exist_ok=True)
-    results.to_csv(out_dir / "full_backtest_results.csv", index=False)
 
-    # Primary pass count = Kupiec + conditional coverage + ES Test 2.
-    # Christoffersen independence remains a separately reported diagnostic.
-    grouped = results.groupby(["commodity", "model"], sort=True)
-    summary = grouped[["kupiec_passed", "cc_passed", "as_passed"]].sum()
-    summary["primary_tests_passed"] = summary.sum(axis=1)
-    summary["primary_tests_total"] = grouped.size() * 3
-    summary["independence_passed"] = grouped["ind_passed"].sum()
-    summary["independence_total"] = grouped.size()
-    summary = summary.reset_index()
-    summary.to_csv(out_dir / "summary_pass_counts.csv", index=False)
+    native = _backtest_rows(
+        forecasts, window, refit_every, predictive_draws, common_dates=False
+    )
+    primary = _backtest_rows(
+        forecasts, window, refit_every, predictive_draws, common_dates=True
+    )
+
+    # Primary paper-facing table: identical dates across models.
+    primary.to_csv(out_dir / "full_backtest_results.csv", index=False)
+    primary.to_csv(out_dir / "full_backtest_results_common_dates.csv", index=False)
+    native.to_csv(out_dir / "full_backtest_results_native.csv", index=False)
+
+    _summary_table(primary).to_csv(out_dir / "summary_pass_counts.csv", index=False)
+    _summary_table(primary).to_csv(
+        out_dir / "summary_pass_counts_common_dates.csv", index=False
+    )
+    _summary_table(native).to_csv(
+        out_dir / "summary_pass_counts_native.csv", index=False
+    )
+
+    for commodity in sorted({c for c, _m in forecasts}):
+        n_common = len(common_valid_dates(forecasts, commodity))
+        logger.info(
+            "[COMMON-DATE] %s: %d dates retained across %d models",
+            commodity,
+            n_common,
+            sum(1 for c, _m in forecasts if c == commodity),
+        )
+        if n_common == 0:
+            raise RuntimeError(
+                f"No common valid forecast dates remain for {commodity}; "
+                "primary model comparison is undefined."
+            )
+
     logger.info("Backtest tables saved under %s", out_dir)
-    return results
+    return primary
 
 
 def main():
@@ -238,6 +340,7 @@ def main():
         args.predictive_draws,
         MODEL_VERSION,
     )
+    logger.info("Rolling MCMC policy: %s", mcmc_policy_label())
 
     returns_all = load_all_returns(verbose=False)
     prices_all = load_all_prices()
