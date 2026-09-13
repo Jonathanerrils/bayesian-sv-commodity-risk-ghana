@@ -1,55 +1,80 @@
 # Bayesian Latent Stochastic Volatility Models for Commodity Price Risk in West Africa
 
-Code, data pipeline, and paper for a study comparing Bayesian latent stochastic volatility models against standard benchmarks (GARCH, EGARCH, Ornstein-Uhlenbeck, Historical Simulation) for Value-at-Risk and Expected Shortfall forecasting on cocoa, gold, and Brent crude oil — three commodities central to Ghana's economy.
+Code, data, and manuscript for a comparison of Bayesian stochastic-volatility models with GARCH, asymmetric EGARCH, Ornstein-Uhlenbeck, and Historical Simulation benchmarks for one-day Value-at-Risk (VaR) and Expected Shortfall (ES) forecasting on cocoa, gold, and Brent crude oil.
 
-The core finding: no single model wins everywhere. Student-t stochastic volatility models achieve a clean sweep of every backtest for both cocoa and gold, with a leverage extension offering a further, smaller improvement for cocoa specifically. Oil resists every specification tested, including the richest one, at the 99% VaR confidence level. The full reasoning is in the paper.
+## Audit status — September 2026
+
+An independent code audit identified validity problems in the original (`v1`) rolling SV results. The July 2026 checkpoint CSVs, tables, figures, and manuscript results are therefore **legacy/provisional artifacts and must not be treated as confirmed results** until the corrected pipeline has been rerun.
+
+The main issues were:
+
+1. SV structural parameters were refitted every 42 trading days, but the latent volatility state was not updated between refits, producing mechanically flat VaR/ES blocks.
+2. `rho` was estimated in the leverage variants but omitted from one-step predictive simulation.
+3. Student-t innovations were not variance-standardized and the prior did not actually enforce `nu > 2`.
+4. the Acerbi-Szekely Test 2 implementation used mean ES rather than each day's `ES_t` forecast.
+5. the EGARCH benchmark omitted the asymmetric `o=1` term described in the paper.
+6. `--window` was logged but not threaded into production model calls, and checkpoint names did not identify the run configuration.
+
+The `audit-fix/sv-validity-repair` line of work addresses these issues. Corrected results should be written under `checkpoints/v2/` and `outputs/v2/`; the existing top-level checkpoint/result files are retained only as an audit trail.
+
+## Corrected v2 design
+
+The repaired SV runner separates **parameter learning** from **state filtering**. MCMC still re-estimates structural parameters every 42 trading days by default, but after every one-day forecast the newly observed return is used to filter the latent volatility state before the next forecast. Leverage is propagated through the predictive shock, Student-t innovations are constrained to finite variance and standardized to unit variance, and each VaR/ES pair is estimated from a shared posterior predictive sample.
+
+Partial SV runs now save a filter-state sidecar together with the CSV checkpoint. If the two become inconsistent, the runner refuses an inexact resume rather than silently changing the refit schedule.
 
 ## Repository structure
 
+```text
+paper/          Manuscript source and the legacy compiled paper
+src/            Data loading, models, filtering, backtests, production runner
+data/raw/       Raw commodity price and validation series
+checkpoints/    Legacy v1 forecasts plus configuration-scoped v2 forecasts
+outputs/        Legacy tables plus configuration-scoped v2 tables
+tests/          Regression/unit tests for the validity fixes
+.github/        CI workflow
 ```
-paper/          Full paper (LaTeX source + compiled PDF), Elsevier elsarticle format
-src/            Model estimation and backtesting code
-data/raw/       Raw commodity price series (cocoa, gold, oil) plus validation series
-checkpoints/    Saved rolling-window forecast results per model per commodity
-outputs/        Backtest result tables and figures
-notebooks/      Data cleaning, exploratory analysis, and stylised facts (Jupyter)
-docs/           Data dictionary, cleaning policy, and supporting documentation
+
+## Environment
+
+The v2 repair deliberately pins PyMC 5 because PyMC 5 is incompatible with ArviZ 1.x. Install with:
+
+```bash
+python -m venv .venv
+source .venv/bin/activate   # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+pytest -q
 ```
 
-## Reproducing this
+## Running corrected forecasts
 
-Requirements are in `requirements.txt`. The one dependency worth knowing about ahead of time: fitting the Bayesian SV models via NUTS MCMC is slow — each commodity's full rolling backtest across four SV variants takes somewhere between 10 and 25 hours on a normal laptop, depending on which regime-change periods fall inside the sample. GARCH, EGARCH, and OU are fast by comparison (under 30 minutes for all three commodities together).
-
-To run the benchmark models only:
+Benchmark models only:
 
 ```bash
 cd src
-python production_runner.py --benchmark-only
+python production_runner.py --benchmark-only --window 1000
 ```
 
-To run one commodity's SV models:
+One commodity's SV models:
 
 ```bash
-python production_runner.py --commodity gold --sv-only
+python production_runner.py --commodity gold --sv-only \
+  --window 1000 --refit-every 42 --predictive-draws 20000
 ```
 
-The SV runner checkpoints progress every 50 steps, so an interrupted run resumes from the last checkpoint rather than starting over — this matters in practice, since a run this long will get interrupted by something eventually.
+Window sensitivity now creates separate checkpoint namespaces, so for example:
 
-## Data sources and known limitations
+```bash
+python production_runner.py --window 750
+python production_runner.py --window 1000
+python production_runner.py --window 1250
+```
 
-Full provenance for every series, including the specific data-quality issues found and how they were handled, is in `docs/data_dictionary.md`. Briefly: cocoa and gold prices come from Yahoo Finance continuous futures, cross-validated against ICCO and Stooq respectively; oil uses FRED's Brent spot series as primary, since Brent — not WTI — is the internationally relevant benchmark for West African oil exposure, and the two turned out to behave as genuinely different risk processes during the April 2020 negative-price episode.
+cannot silently reuse one another's forecasts.
 
-## Status of results in this repository
+## Robustness checks still required
 
-All 24 checkpoint files are now present: all three commodities (cocoa, gold, oil), all eight models (four benchmarks — GARCH, EGARCH, OU, Historical Simulation — and four SV variants), each a complete rolling-window forecast series. Every checkpoint was independently spot-checked before being added here: row counts match the expected out-of-sample step count exactly, OU non-convergence rates match the paper's stated 4.3%/5.1%/10.7% figures for cocoa/oil/gold respectively, and a backtest recomputed directly from the raw cocoa SV-t-Leverage checkpoint reproduces the paper's reported 36 violations at 99% VaR exactly.
-
-The compiled backtest result tables in `outputs/tables/` are currently split by commodity (produced from separate `--commodity X --sv-only` runs); a single combined 48-row file has not yet been generated in one pass, though it can be reproduced directly from the 24 checkpoints above using `production_runner.py`'s compilation step.
-
-A real correction is worth noting explicitly: an earlier draft of this paper had several cells wrong in the summary table, including one case where the Kupiec and Christoffersen test results were reversed for oil's best-performing model. This was caught by cross-checking the paper's claims directly against the aggregated results CSVs rather than against console screenshots, and is exactly the kind of error this repository's structure — raw checkpoints alongside aggregated tables alongside the paper's claims — is meant to make possible to catch.
-
-## Six pre-committed robustness checks, not yet run
-
-Rolling window length sensitivity (750/1,000/1,250 days), cocoa's three flagged 2024 rollover-illiquidity dates excluded, cocoa using ICCO's price series instead of Yahoo, oil using WTI instead of Brent, prior sensitivity on the persistence parameter, and a GARCH order check against (1,2) and (2,1). These are stated in the paper as outstanding, not silently assumed complete.
+The pre-specified robustness work remains outstanding until rerun on the repaired pipeline: rolling-window sensitivity (750/1,000/1,250 days), exclusion of the three flagged 2024 cocoa dates, ICCO in place of the primary cocoa series, WTI in place of Brent, prior sensitivity, and GARCH-order sensitivity. These checks should be completed before the manuscript's headline conclusions are restored.
 
 ## Author
 
