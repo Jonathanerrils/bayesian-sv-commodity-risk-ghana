@@ -4,7 +4,7 @@ The benchmark family deliberately crosses two volatility dynamics (GARCH and
 asymmetric EGARCH) with two innovation laws (Gaussian and standardized
 Student-t). This makes the comparison with SV-t scientifically fairer: a gain
 from SV-t should not be attributable merely to giving only the SV family heavy
- tails.
+tails.
 """
 
 from __future__ import annotations
@@ -18,6 +18,15 @@ SUPPORTED_MODEL_TYPES = {"GARCH", "EGARCH"}
 SUPPORTED_DISTRIBUTIONS = {"normal", "t"}
 
 
+def _parameter_values(result, prefix: str) -> list[float]:
+    """Extract ordered ARCH parameter-family values such as alpha[i]/beta[i]."""
+    return [
+        float(value)
+        for name, value in result.params.items()
+        if str(name).startswith(f"{prefix}[")
+    ]
+
+
 def fit_garch(
     returns: np.ndarray,
     model_type: str = "GARCH",
@@ -25,19 +34,10 @@ def fit_garch(
     q: int = 1,
     distribution: str = "normal",
 ):
-    """Fit GARCH(1,1) or asymmetric EGARCH(1,1,1).
+    """Fit GARCH(p,q) or asymmetric EGARCH(p,1,q).
 
-    Parameters
-    ----------
-    returns
-        Log returns in decimal units. ``arch`` is fit on percentage returns for
-        numerical stability.
-    model_type
-        ``"GARCH"`` or ``"EGARCH"``.
-    distribution
-        ``"normal"`` or ``"t"``. ``arch``'s Student-t distribution is
-        standardized to unit variance, so conditional variance retains the
-        same interpretation across the Gaussian and t benchmarks.
+    ``arch`` is fit on percentage returns for numerical stability. Student-t
+    innovations use ``arch``'s standardized (unit-variance) t distribution.
     """
     if model_type not in SUPPORTED_MODEL_TYPES:
         raise ValueError(f"model_type must be one of {sorted(SUPPORTED_MODEL_TYPES)}")
@@ -45,6 +45,8 @@ def fit_garch(
         raise ValueError(
             f"distribution must be one of {sorted(SUPPORTED_DISTRIBUTIONS)}"
         )
+    if p < 1 or q < 1:
+        raise ValueError("p and q must both be >= 1")
 
     ret_pct = np.asarray(returns, dtype=float) * 100.0
     vol = "GARCH" if model_type == "GARCH" else "EGARCH"
@@ -65,16 +67,28 @@ def fit_garch(
     try:
         result = model.fit(disp="off", show_warning=False)
 
-        # Enforce the stationarity conditions used in the manuscript rather
-        # than silently retaining an invalid rolling-window estimate.
+        # Enforce stationarity for any p/q order used in robustness checks.
+        beta_values = _parameter_values(result, "beta")
+        if not beta_values or not np.all(np.isfinite(beta_values)):
+            return None
+
         if model_type == "GARCH":
-            alpha = float(result.params.get("alpha[1]", 0.0))
-            beta = float(result.params.get("beta[1]", 0.0))
-            if alpha < 0 or beta < 0 or alpha + beta >= 1.0:
+            alpha_values = _parameter_values(result, "alpha")
+            if not alpha_values or not np.all(np.isfinite(alpha_values)):
+                return None
+            if any(x < 0 for x in alpha_values + beta_values):
+                return None
+            if sum(alpha_values) + sum(beta_values) >= 1.0:
                 return None
         else:
-            beta = float(result.params.get("beta[1]", np.nan))
-            if not np.isfinite(beta) or abs(beta) >= 1.0:
+            # Covariance stationarity of log variance requires the AR roots to
+            # be stable. For q<=2 (the planned sensitivity orders), the simple
+            # sum condition is a conservative screen; the primary model q=1 is
+            # exactly the familiar |beta|<1 condition.
+            if q == 1:
+                if abs(beta_values[0]) >= 1.0:
+                    return None
+            elif sum(abs(x) for x in beta_values) >= 1.0:
                 return None
 
         if distribution == "t":
@@ -88,12 +102,7 @@ def fit_garch(
 
 
 def _student_t_var_es_multiplier(alpha: float, nu: float) -> tuple[float, float]:
-    """Return unit-variance Student-t quantile and positive ES multiplier.
-
-    ``scipy.stats.t`` uses the ordinary t scale, whose variance is
-    ``nu/(nu-2)``. ``arch`` instead uses a standardized Student-t with variance
-    one, hence the ``sqrt((nu-2)/nu)`` rescaling below.
-    """
+    """Return unit-variance Student-t quantile and positive ES multiplier."""
     if nu <= 2.0:
         raise ValueError("Student-t degrees of freedom must exceed 2")
     q_raw = float(stats.t.ppf(alpha, df=nu))
@@ -140,6 +149,8 @@ def rolling_var_es(
     window: int = 1000,
     alphas: list | None = None,
     distribution: str = "normal",
+    p: int = 1,
+    q: int = 1,
 ) -> pd.DataFrame:
     """Daily rolling one-step VaR/ES for one GARCH-family specification."""
     if alphas is None:
@@ -160,6 +171,8 @@ def rolling_var_es(
         result = fit_garch(
             train,
             model_type=model_type,
+            p=p,
+            q=q,
             distribution=distribution,
         )
         if result is None:
