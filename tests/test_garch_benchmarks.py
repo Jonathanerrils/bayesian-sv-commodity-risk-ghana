@@ -1,13 +1,18 @@
+import sys
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 
-from src.garch_model import (
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+from garch_model import (
     _student_t_var_es_multiplier,
     fit_garch,
     forecast_var_es,
     rolling_var_es,
 )
-from src.production_runner import GARCH_BENCHMARK_SPECS
+from production_runner import GARCH_BENCHMARK_SPECS
 
 
 def test_student_t_unit_variance_quantile_and_es_are_sensible():
