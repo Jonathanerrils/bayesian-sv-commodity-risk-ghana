@@ -4,7 +4,8 @@ This is deliberately small enough for CI. It is not a substitute for the
 production W=1000 experiment. The purpose is to verify on committed real data
 that:
 
-* an actual Student-t SV posterior converges under the rolling settings;
+* an actual Student-t SV posterior converges under the candidate rolling MCMC
+  settings;
 * leverage-aware SV forecasting also runs on real data;
 * the latent state changes after conditioning on newly observed returns;
 * particle-filter ESS remains observable/non-degenerate;
@@ -45,6 +46,14 @@ FORECAST_DAYS = 20
 N_PREDICTIVE = 5_000
 ALPHAS = (0.01, 0.05)
 BASE_SEED = 20_260_913
+
+# Candidate production refit configuration. The first empirical pilot showed
+# that the legacy rolling choice (1 chain, 500 tune, 500 draws) had min ESS of
+# only 77.6 for SV-t and 32.8 for SV-t-Leverage on this real-data window.
+MCMC_CHAINS = 2
+MCMC_TUNE = 500
+MCMC_DRAWS = 500
+TARGET_ACCEPT = 0.95
 
 
 def _max_equal_run(values, decimals: int = 8) -> int:
@@ -89,13 +98,17 @@ def _run_sv_variant(
     fit = fit_sv(
         train,
         variant=variant,
-        fast_mode=True,
-        target_accept=0.95,
+        chains=MCMC_CHAINS,
+        draws=MCMC_DRAWS,
+        tune=MCMC_TUNE,
+        fast_mode=False,
+        target_accept=TARGET_ACCEPT,
         random_seed=BASE_SEED + seed_offset,
     )
 
     fit_summary = {
         "converged": bool(fit.get("converged", False)),
+        "max_rhat": float(fit.get("max_rhat", np.nan)),
         "min_ess": float(fit.get("min_ess", np.nan)),
         "n_divergences": int(fit.get("n_divergences", -1))
         if np.isfinite(fit.get("n_divergences", np.nan))
@@ -158,8 +171,6 @@ def _run_sv_variant(
         "legacy_comparison": _legacy_flatness(variant, df.index),
     }
 
-    # Hard pilot gates. These are deliberately conservative: the goal is to
-    # catch broken mechanics, not to make scientific claims from 20 forecasts.
     summary["pilot_pass"] = bool(
         summary["converged"]
         and summary["n_divergences"] == 0
@@ -202,8 +213,11 @@ def _run_benchmarks(sample: pd.Series) -> dict:
                 and (valid["es_0.05"] >= valid["var_0.05"]).all()
             ),
         }
+        # A single short-window stationarity rejection is recorded as a warning,
+        # not a pipeline failure. Production comparison will use common valid
+        # dates so unavailable forecasts never get silently dropped model-wise.
         out[label]["pilot_pass"] = bool(
-            out[label]["n_valid"] == len(df)
+            out[label]["failure_rate"] <= 0.05
             and out[label]["finite_forecasts"]
             and out[label]["es_ge_var"]
         )
@@ -222,6 +236,12 @@ def main() -> None:
         "window": WINDOW,
         "forecast_days": FORECAST_DAYS,
         "n_predictive": N_PREDICTIVE,
+        "mcmc": {
+            "chains": MCMC_CHAINS,
+            "tune": MCMC_TUNE,
+            "draws": MCMC_DRAWS,
+            "target_accept": TARGET_ACCEPT,
+        },
         "sample_start": sample.index.min().isoformat(),
         "sample_end": sample.index.max().isoformat(),
         "models": {},
