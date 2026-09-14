@@ -8,15 +8,22 @@ For a mean-adjusted return x_t, the symmetric state equation is
     x_t = exp(h_t / 2) * epsilon_t
     h_{t+1} = mu + phi * (h_t - mu) + sigma_eta * eta_t
 
-For leverage variants, epsilon_t and eta_t are correlated through rho.  Thus a
+For leverage variants, epsilon_t and eta_t are correlated through rho. Thus a
 negative return shock can alter the distribution of h_{t+1}; the return at t is
-not correlated with the innovation that created h_t.  This is the standard
-forward leverage timing used in the stochastic-volatility literature.
+not correlated with the innovation that created h_t. This is the forward
+leverage timing used throughout this implementation.
 
-A rolling fit over T observed returns contains states h_0,...,h_T.  The final
-posterior state h_T is therefore the state for the next forecast date.  Daily
+A rolling fit over T observed returns contains states h_0,...,h_T. The final
+posterior state h_T is therefore the state for the next forecast date. Daily
 filtering forecasts from h_t first, then conditions on the realised return to
 infer eta_t and propagates to h_{t+1}.
+
+Structural parameters are re-estimated only at the predeclared refit boundaries
+0, refit_every, 2*refit_every, ... . If a scheduled refit fails the strict MCMC
+gate, that entire forecast block is explicitly unavailable; the algorithm does
+not retry on an easier next-day window. This makes model availability an
+observable outcome and keeps canonical and distributed production semantics
+identical.
 """
 
 from __future__ import annotations
@@ -42,7 +49,6 @@ DEFAULT_ROLLING_MCMC_ATTEMPTS = (
     {"chains": 4, "tune": 1_000, "draws": 1_000},
     {"chains": 4, "tune": 2_000, "draws": 2_000},
 )
-
 STRUCTURAL_DIAGNOSTIC_VARS = ("mu", "phi", "sigma_eta", "nu", "rho")
 
 
@@ -64,13 +70,7 @@ def _np_unit_variance_t_scale(nu):
 
 
 def _noncentered_state_path(mu, phi, sigma_eta, T: int):
-    """Construct h_0,...,h_T from independent standard-normal innovations.
-
-    The initial state is stationary.  ``eta[t]`` is the standardised volatility
-    innovation taking h_t to h_{t+1}.  Keeping eta independent a priori avoids
-    the strong latent-state/scale geometry induced by directly sampling a long
-    centred AR(1) path.
-    """
+    """Construct h_0,...,h_T from independent standard-normal innovations."""
     h0_std = pm.Normal("h0_std", mu=0.0, sigma=1.0)
     eta = pm.Normal("eta", mu=0.0, sigma=1.0, shape=T)
     stationary_sd = sigma_eta / pt.sqrt(pt.clip(1.0 - phi**2, 1e-8, np.inf))
@@ -130,7 +130,12 @@ def build_sv_leverage(returns: np.ndarray, T: int) -> pm.Model:
 
 
 def build_sv_t_leverage(returns: np.ndarray, T: int) -> pm.Model:
-    """Heavy-tailed leverage SV with unit-variance conditional t residuals."""
+    """Leverage SV with a unit-variance Student-t orthogonal innovation.
+
+    Conditional on eta_t the orthogonal residual is Student-t. The marginal
+    epsilon_t is a normal-t convolution, not exactly a Student-t distribution;
+    manuscript wording must preserve that distinction.
+    """
     with pm.Model() as model:
         _mu, _phi, _sigma, h, eta = _common_parameters(T)
         nu = _nu_prior()
@@ -205,7 +210,6 @@ def _structural_diagnostics(trace, chains: int) -> dict:
             and min_ess > FAST_MIN_ESS
             and n_divergences == 0
         )
-
     return {
         "max_rhat": max_rhat,
         "min_ess": min_ess,
@@ -229,14 +233,12 @@ def fit_sv(
     """Fit one SV specification and return structural convergence diagnostics."""
     if variant not in MODEL_BUILDERS:
         raise ValueError(f"Unknown variant '{variant}'. Choose from {list(MODEL_BUILDERS)}")
-
     if fast_mode:
         chains, draws, tune = 1, 500, 500
 
     returns = np.asarray(returns, dtype=float)
     if returns.ndim != 1 or len(returns) < 2 or not np.isfinite(returns).all():
         raise ValueError("returns must be a finite one-dimensional array")
-
     mean_return = float(np.mean(returns))
     demeaned = returns - mean_return
     model = MODEL_BUILDERS[variant](demeaned, len(demeaned))
@@ -253,7 +255,6 @@ def fit_sv(
                 target_accept=target_accept,
                 nuts_sampler_kwargs={"max_treedepth": 12},
             )
-
         diagnostics = _structural_diagnostics(trace, chains)
         return {
             "trace": trace,
@@ -296,7 +297,6 @@ def fit_sv_adaptive(
     """Apply the strict rolling MCMC escalation; never accept a weak trace."""
     if attempts is None:
         attempts = DEFAULT_ROLLING_MCMC_ATTEMPTS
-
     records = []
     final_fit = None
     for attempt_no, cfg in enumerate(attempts, start=1):
@@ -326,7 +326,6 @@ def fit_sv_adaptive(
         final_fit = fit
         if fit.get("converged", False):
             break
-
     if final_fit is None:
         raise ValueError("at least one MCMC attempt is required")
     final_fit = dict(final_fit)
@@ -342,14 +341,12 @@ def initialize_filter_state(fit_result: dict) -> dict:
     trace = fit_result.get("trace")
     if trace is None:
         raise ValueError("Cannot initialize filter state without a posterior trace")
-
     state = {
         "variant": fit_result["variant"],
         "mean_return": float(fit_result["mean_return"]),
         "mu": trace.posterior["mu"].values.reshape(-1).astype(float),
         "phi": trace.posterior["phi"].values.reshape(-1).astype(float),
         "sigma_eta": trace.posterior["sigma_eta"].values.reshape(-1).astype(float),
-        # h has T+1 states for T observed returns; h[-1] is forecast-date h_T.
         "h": trace.posterior["h"].values[:, :, -1].reshape(-1).astype(float),
     }
     if "nu" in trace.posterior:
@@ -373,11 +370,7 @@ def _transition_filter_state(state: dict, rng: np.random.Generator) -> dict:
     return transition
 
 
-def _predictive_returns(
-    transition: dict,
-    n_predictive: int,
-    rng: np.random.Generator,
-) -> np.ndarray:
+def _predictive_returns(transition: dict, n_predictive: int, rng: np.random.Generator) -> np.ndarray:
     """Draw r_t from h_t jointly with the proposed eta_t when leverage is used."""
     n_particles = len(transition["h"])
     idx = rng.integers(0, n_particles, size=int(n_predictive))
@@ -385,19 +378,16 @@ def _predictive_returns(
     eta = transition["eta"][idx]
     vol = np.exp(h / 2.0)
     variant = transition["variant"]
-
     if variant in ("SV-t", "SV-t-Leverage"):
         nu = transition["nu"][idx]
         xi = rng.standard_t(nu) * _np_unit_variance_t_scale(nu)
     else:
         xi = rng.normal(size=len(idx))
-
     if variant in ("SV-Leverage", "SV-t-Leverage"):
         rho = transition["rho"][idx]
         eps = rho * eta + np.sqrt(np.clip(1.0 - rho**2, 1e-12, 1.0)) * xi
     else:
         eps = xi
-
     return transition["mean_return"] + vol * eps
 
 
@@ -408,7 +398,6 @@ def _observation_loglik(transition: dict, actual_return: float) -> np.ndarray:
     eta = transition["eta"]
     vol = np.exp(h / 2.0)
     variant = transition["variant"]
-
     if variant in ("SV-Leverage", "SV-t-Leverage"):
         rho = transition["rho"]
         loc = rho * vol * eta
@@ -416,24 +405,17 @@ def _observation_loglik(transition: dict, actual_return: float) -> np.ndarray:
     else:
         loc = np.zeros_like(vol)
         base_scale = vol
-
     if variant in ("SV-t", "SV-t-Leverage"):
         nu = transition["nu"]
         scale = base_scale * _np_unit_variance_t_scale(nu)
         return stats.t.logpdf(x, df=nu, loc=loc, scale=np.maximum(scale, 1e-12))
-
     return stats.norm.logpdf(x, loc=loc, scale=np.maximum(base_scale, 1e-12))
 
 
-def update_filter_state(
-    transition: dict,
-    actual_return: float,
-    rng: np.random.Generator,
-) -> tuple[dict, float]:
+def update_filter_state(transition: dict, actual_return: float, rng: np.random.Generator) -> tuple[dict, float]:
     """Condition on r_t, resample, and advance particles from h_t to h_{t+1}."""
     if "h_next" not in transition:
         raise ValueError("transition is missing h_next; call _transition_filter_state first")
-
     logw = _observation_loglik(transition, actual_return)
     finite = np.isfinite(logw)
     if not finite.any():
@@ -448,10 +430,8 @@ def update_filter_state(
             weights = np.full(len(logw), 1.0 / len(logw))
         else:
             weights /= total
-
     filter_ess = float(1.0 / np.sum(weights**2))
     idx = rng.choice(len(weights), size=len(weights), replace=True, p=weights)
-
     new_state = {
         "variant": transition["variant"],
         "mean_return": transition["mean_return"],
@@ -472,12 +452,7 @@ def predictive_var_es(r_pred: np.ndarray, alpha: float) -> tuple[float, float]:
     return float(var), float(es)
 
 
-def forecast_sv_var_es(
-    fit_result: dict,
-    alpha: float,
-    n_predictive: int = 20_000,
-    random_seed: int = 42,
-) -> tuple:
+def forecast_sv_var_es(fit_result: dict, alpha: float, n_predictive: int = 20_000, random_seed: int = 42) -> tuple:
     """One-step forecast after a fresh fit using its h_T forecast-date state."""
     if fit_result.get("trace") is None:
         return np.nan, np.nan
@@ -492,29 +467,47 @@ def _state_sidecar_path(checkpoint_path: Path) -> Path:
     return checkpoint_path.with_suffix(".state.npz")
 
 
-def _save_filter_state(path: Path, state: dict, next_i: int, last_fit_idx: int):
+def _save_filter_state(
+    path: Path,
+    state: dict | None,
+    next_i: int,
+    active_block_start: int,
+    variant: str,
+):
+    """Persist either an active particle state or an explicit unavailable block."""
     arrays = {
         "next_i": np.array([next_i], dtype=int),
-        "last_fit_idx": np.array([last_fit_idx], dtype=int),
-        "variant": np.array([state["variant"]]),
-        "mean_return": np.array([state["mean_return"]], dtype=float),
+        "active_block_start": np.array([active_block_start], dtype=int),
+        "variant": np.array([variant]),
+        "has_state": np.array([state is not None], dtype=bool),
     }
-    for key in ("mu", "phi", "sigma_eta", "nu", "rho", "h"):
-        if key in state:
-            arrays[key] = np.asarray(state[key])
+    if state is not None:
+        arrays["mean_return"] = np.array([state["mean_return"]], dtype=float)
+        for key in ("mu", "phi", "sigma_eta", "nu", "rho", "h"):
+            if key in state:
+                arrays[key] = np.asarray(state[key])
     np.savez_compressed(path, **arrays)
 
 
-def _load_filter_state(path: Path) -> tuple[dict, int, int]:
+def _load_filter_state(path: Path) -> tuple[dict | None, int, int, str]:
     data = np.load(path, allow_pickle=False)
-    state = {
-        "variant": str(data["variant"][0]),
-        "mean_return": float(data["mean_return"][0]),
-    }
-    for key in ("mu", "phi", "sigma_eta", "nu", "rho", "h"):
-        if key in data.files:
-            state[key] = data[key]
-    return state, int(data["next_i"][0]), int(data["last_fit_idx"][0])
+    variant = str(data["variant"][0])
+    has_state = bool(data["has_state"][0])
+    state = None
+    if has_state:
+        state = {
+            "variant": variant,
+            "mean_return": float(data["mean_return"][0]),
+        }
+        for key in ("mu", "phi", "sigma_eta", "nu", "rho", "h"):
+            if key in data.files:
+                state[key] = data[key]
+    return (
+        state,
+        int(data["next_i"][0]),
+        int(data["active_block_start"][0]),
+        variant,
+    )
 
 
 def rolling_sv_var_es(
@@ -530,13 +523,15 @@ def rolling_sv_var_es(
     random_seed: int = 42,
     mcmc_attempts=None,
 ) -> pd.DataFrame:
-    """Adaptive walk-forward VaR/ES with refits and observation-driven filtering."""
+    """Walk-forward VaR/ES with fixed scheduled refits and daily state filtering."""
     if alphas is None:
         alphas = [0.01, 0.05]
     if variant not in MODEL_BUILDERS:
         raise ValueError(f"Unknown variant: {variant}")
     if len(returns) <= window:
         raise ValueError("Series length must exceed rolling window")
+    if refit_every < 1:
+        raise ValueError("refit_every must be >= 1")
     if mcmc_attempts is None:
         mcmc_attempts = DEFAULT_ROLLING_MCMC_ATTEMPTS
 
@@ -544,9 +539,9 @@ def rolling_sv_var_es(
     dates = returns.index
     n_forecasts = len(ret_array) - window
     results: list[dict] = []
-    n_failures = 0
+    n_failed_refits = 0
     filter_state = None
-    last_fit_idx = -refit_every
+    active_block_start = 0
     start_i = 0
 
     checkpoint_path = Path(checkpoint_path) if checkpoint_path is not None else None
@@ -560,30 +555,33 @@ def rolling_sv_var_es(
             if sidecar is None or not sidecar.exists():
                 raise RuntimeError(
                     "Partial CSV exists without matching filter-state sidecar; "
-                    "refusing an inexact resume. Remove the partial checkpoint "
-                    "to restart this model cleanly."
+                    "refusing an inexact resume. Remove the partial checkpoint to restart cleanly."
                 )
-            filter_state, state_next_i, last_fit_idx = _load_filter_state(sidecar)
+            filter_state, state_next_i, active_block_start, state_variant = _load_filter_state(sidecar)
             if state_next_i != len(existing):
                 raise RuntimeError("Checkpoint CSV/state sidecar are out of sync")
-            if filter_state["variant"] != variant:
+            if state_variant != variant:
                 raise RuntimeError("Checkpoint state belongs to a different SV variant")
             results = existing.to_dict("records")
             start_i = len(existing)
-            n_failures = int(existing["estimation_failed"].sum())
+            refit_rows = existing[existing.get("refit", False).fillna(False).astype(bool)] if "refit" in existing else existing.iloc[0:0]
+            if len(refit_rows) and "mcmc_converged" in refit_rows:
+                n_failed_refits = int((~refit_rows["mcmc_converged"].fillna(False).astype(bool)).sum())
 
     for i in range(start_i, n_forecasts):
-        train = ret_array[i : i + window]
         actual_return = ret_array[i + window]
-        forecast_date = dates[i + window]
         row = {
-            "date": forecast_date,
+            "date": dates[i + window],
             "actual_return": actual_return,
             "estimation_failed": False,
             "refit": False,
+            "mcmc_converged": np.nan,
         }
 
-        if filter_state is None or (i - last_fit_idx) >= refit_every:
+        scheduled_refit = (i % refit_every) == 0
+        if scheduled_refit:
+            active_block_start = i
+            train = ret_array[i : i + window]
             fit = fit_sv_adaptive(
                 train,
                 variant=variant,
@@ -592,16 +590,17 @@ def rolling_sv_var_es(
                 attempts=mcmc_attempts,
             )
             row["refit"] = True
+            row["mcmc_converged"] = bool(fit.get("converged", False))
             row["mcmc_attempt"] = fit.get("accepted_attempt", np.nan)
             row["mcmc_max_rhat"] = fit.get("max_rhat", np.nan)
             row["mcmc_min_ess"] = fit.get("min_ess", np.nan)
             row["mcmc_divergences"] = fit.get("n_divergences", np.nan)
+            row["mcmc_attempts_json"] = str(fit.get("mcmc_attempts", []))
             if not fit.get("converged", False):
-                n_failures += 1
+                n_failed_refits += 1
                 filter_state = None
             else:
                 filter_state = initialize_filter_state(fit)
-                last_fit_idx = i
 
         if filter_state is None:
             row["estimation_failed"] = True
@@ -610,9 +609,6 @@ def rolling_sv_var_es(
                 row[f"var_{alpha}"] = np.nan
                 row[f"es_{alpha}"] = np.nan
         else:
-            # This RNG drives the joint draw of eta_t and r_t.  Forecast first;
-            # after r_t is observed, the same eta_t proposals are reweighted to
-            # obtain h_{t+1}.
             step_rng = np.random.default_rng(random_seed * 1_000_003 + i)
             transition = _transition_filter_state(filter_state, step_rng)
             r_pred = _predictive_returns(transition, n_predictive, step_rng)
@@ -620,7 +616,6 @@ def rolling_sv_var_es(
                 var, es = predictive_var_es(r_pred, alpha)
                 row[f"var_{alpha}"] = var
                 row[f"es_{alpha}"] = es
-
             filter_state, filter_ess = update_filter_state(
                 transition, actual_return, step_rng
             )
@@ -631,16 +626,21 @@ def rolling_sv_var_es(
         if checkpoint_path and (i + 1) % checkpoint_every == 0:
             checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
             pd.DataFrame(results).to_csv(checkpoint_path, index=False)
-            if filter_state is not None:
-                _save_filter_state(sidecar, filter_state, i + 1, last_fit_idx)
+            _save_filter_state(
+                sidecar, filter_state, i + 1, active_block_start, variant
+            )
 
     df = pd.DataFrame(results).set_index("date")
     if checkpoint_path:
         checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
         df.to_csv(checkpoint_path)
-        if filter_state is not None:
-            _save_filter_state(sidecar, filter_state, n_forecasts, last_fit_idx)
+        _save_filter_state(
+            sidecar, filter_state, n_forecasts, active_block_start, variant
+        )
 
-    if n_failures:
-        print(f"WARNING [{variant}]: {n_failures} failed MCMC refits after escalation")
+    if n_failed_refits:
+        print(
+            f"WARNING [{variant}]: {n_failed_refits} scheduled MCMC refits failed "
+            "after escalation; their complete forecast blocks remain unavailable"
+        )
     return df
