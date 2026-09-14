@@ -1,12 +1,9 @@
 name: sv-v3-convergence-diagnostic
 
 on:
-  pull_request:
-    types: [opened, synchronize, reopened]
-    paths:
-      - 'src/sv_model.py'
-      - 'scripts/diagnose_sv_refit.py'
-      - '.github/workflows/sv-v3-diagnostic.yml'
+  # Production-scale MCMC diagnostics are intentionally manual. Pull-request
+  # path filters evaluate the full PR diff on synchronize events and otherwise
+  # re-run these expensive fits after unrelated benchmark/backtest commits.
   workflow_dispatch:
 
 jobs:
