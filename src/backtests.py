@@ -16,6 +16,48 @@ from scipy import stats
 from scipy.special import xlogy
 
 
+def bonferroni_adjust_pvalue(p_value: float, family_size: int) -> float:
+    """Return a Bonferroni-adjusted p-value without altering the raw value."""
+    if family_size < 1:
+        raise ValueError("family_size must be at least 1")
+    if not np.isfinite(p_value):
+        return np.nan
+    return float(min(max(float(p_value), 0.0) * family_size, 1.0))
+
+
+def apply_bonferroni_reporting(
+    results: pd.DataFrame,
+    family_size: int,
+    significance: float = 0.05,
+) -> pd.DataFrame:
+    """Add adjusted p-values and corrected non-rejection decisions.
+
+    The paper defines the multiplicity family in terms of model x commodity x
+    confidence-level comparison cells.  Each primary test keeps its raw p-value
+    and receives a Bonferroni-adjusted p-value using that cell-family size.
+
+    Because these are adequacy tests with calibration as the null, ``passed``
+    means *failure to reject inadequacy*. Bonferroni therefore controls false
+    rejection and makes rejection harder; it must not be described as a more
+    stringent proof that a model is adequate.
+    """
+    if family_size < 1:
+        raise ValueError("family_size must be at least 1")
+    out = results.copy()
+    out["bonferroni_family_size"] = int(family_size)
+    out["bonferroni_alpha"] = float(significance / family_size)
+
+    for prefix in ("kupiec", "cc", "as"):
+        p_col = f"{prefix}_p"
+        if p_col not in out:
+            continue
+        raw = pd.to_numeric(out[p_col], errors="coerce")
+        adjusted = np.minimum(raw * family_size, 1.0)
+        out[f"{prefix}_p_bonferroni"] = adjusted
+        out[f"{prefix}_passed_bonferroni"] = adjusted >= significance
+    return out
+
+
 def kupiec_pof(
     actual_returns: np.ndarray,
     var_forecasts: np.ndarray,
@@ -43,14 +85,10 @@ def kupiec_pof(
     hit = actual < -var
     N = int(hit.sum())
     p_hat = N / T
-
-    # xlogy correctly evaluates 0*log(0) as zero, so boundary cases such
-    # as zero violations remain finite rather than being forced to infinity.
     log_null = xlogy(N, alpha) + xlogy(T - N, 1 - alpha)
     log_alt = xlogy(N, p_hat) + xlogy(T - N, 1 - p_hat)
     lr_stat = float(max(-2.0 * (log_null - log_alt), 0.0))
     p_value = float(stats.chi2.sf(lr_stat, df=1))
-
     return {
         "n_violations": N,
         "T": T,
@@ -74,7 +112,6 @@ def christoffersen_cc(
     mask = np.isfinite(actual_returns) & np.isfinite(var_forecasts)
     actual = actual_returns[mask]
     var = var_forecasts[mask]
-
     if len(actual) < 2:
         return {
             "cc_lr_stat": np.nan,
@@ -95,7 +132,6 @@ def christoffersen_cc(
     n01 = int(((hit[:-1] == 0) & (hit[1:] == 1)).sum())
     n10 = int(((hit[:-1] == 1) & (hit[1:] == 0)).sum())
     n11 = int(((hit[:-1] == 1) & (hit[1:] == 1)).sum())
-
     denom0 = n00 + n01
     denom1 = n10 + n11
     total = denom0 + denom1
@@ -112,11 +148,9 @@ def christoffersen_cc(
     )
     lr_ind = float(max(-2.0 * (log_l0 - log_l1), 0.0))
     p_ind = float(stats.chi2.sf(lr_ind, df=1))
-
     pof = kupiec_pof(actual, var, alpha, significance)
     lr_cc = float(pof["lr_stat"] + lr_ind)
     p_cc = float(stats.chi2.sf(lr_cc, df=2))
-
     return {
         "cc_lr_stat": lr_cc,
         "cc_p_value": p_cc,
@@ -139,29 +173,18 @@ def _z2_normal_reference(
     n_simulations: int,
     random_seed: int,
 ) -> np.ndarray:
-    """Efficient reference null for the Acerbi-Szekely Z2 statistic.
-
-    Only tail observations contribute to Z2. Instead of drawing an entire
-    T-vector for every replication, draw N~Binomial(T, alpha) tail counts and
-    then sample only the required truncated-normal tail values.
-    """
     alpha = float(alpha_rounded)
     rng = np.random.default_rng(random_seed)
     counts = rng.binomial(T, alpha, size=n_simulations)
     total_tail = int(counts.sum())
     sums = np.zeros(n_simulations, dtype=float)
-
     if total_tail:
-        # U|U<alpha is Uniform(0, alpha); Phi^{-1}(U) is N(0,1) truncated
-        # below its alpha-quantile.
         x_tail = stats.norm.ppf(rng.uniform(1e-12, alpha, size=total_tail))
         groups = np.repeat(np.arange(n_simulations), counts)
         sums = np.bincount(groups, weights=x_tail, minlength=n_simulations)
-
     q = stats.norm.ppf(alpha)
-    es = stats.norm.pdf(q) / alpha  # positive ES magnitude
-    z2 = sums / (T * alpha * es) + 1.0
-    return np.sort(z2)
+    es = stats.norm.pdf(q) / alpha
+    return np.sort(sums / (T * alpha * es) + 1.0)
 
 
 def acerbi_szekely(
@@ -173,19 +196,7 @@ def acerbi_szekely(
     n_simulations: int = 20_000,
     random_seed: int = 42,
 ) -> dict:
-    """Acerbi-Szekely (2014) Test 2 / unconditional ES test.
-
-    Implements the time-varying statistic
-
-        Z2 = sum_t [r_t I_t / (T * alpha * ES_t)] + 1.
-
-    The statistic is model-free. For a convenient p-value/pass decision this
-    implementation uses a standardized-normal reference null. Acerbi and
-    Szekely show the Z2 critical levels are comparatively stable across a broad
-    set of tail distributions; the reported p-value is therefore explicitly a
-    *reference* p-value rather than a claim that every forecasting model is
-    Gaussian.
-    """
+    """Acerbi-Szekely (2014) Test 2 / unconditional ES reference test."""
     actual_returns = np.asarray(actual_returns, dtype=float)
     var_forecasts = np.asarray(var_forecasts, dtype=float)
     es_forecasts = np.asarray(es_forecasts, dtype=float)
@@ -199,7 +210,6 @@ def acerbi_szekely(
     var = var_forecasts[mask]
     es = es_forecasts[mask]
     T = len(actual)
-
     if T == 0:
         return {
             "z2_stat": np.nan,
@@ -212,25 +222,16 @@ def acerbi_szekely(
 
     hit = actual < -var
     z2 = float(np.sum((actual * hit) / es) / (T * alpha) + 1.0)
-
-    ref = _z2_normal_reference(
-        T,
-        round(float(alpha), 10),
-        int(n_simulations),
-        int(random_seed),
-    )
-    # Lower-tail rejection: materially negative Z2 means risk underestimation.
+    ref = _z2_normal_reference(T, round(float(alpha), 10), int(n_simulations), int(random_seed))
     rank = int(np.searchsorted(ref, z2, side="right"))
     p_value = float(rank / len(ref))
     critical_value = float(np.quantile(ref, significance))
-
     if z2 < 0:
         interpretation = "ES under-estimated (tail risk under-forecast)"
     elif z2 > 0:
         interpretation = "ES over-estimated (tail risk over-forecast)"
     else:
         interpretation = "ES exactly calibrated (Z2=0)"
-
     return {
         "z2_stat": z2,
         "p_value": p_value,
@@ -248,7 +249,6 @@ def run_all_backtests(
 ) -> pd.DataFrame:
     if alphas is None:
         alphas = [0.01, 0.05]
-
     actual = forecast_df["actual_return"].to_numpy(dtype=float)
     rows = []
     for alpha in alphas:
@@ -257,16 +257,10 @@ def run_all_backtests(
         if var_col not in forecast_df:
             continue
         var = forecast_df[var_col].to_numpy(dtype=float)
-        es = (
-            forecast_df[es_col].to_numpy(dtype=float)
-            if es_col in forecast_df
-            else np.full_like(var, np.nan)
-        )
-
+        es = forecast_df[es_col].to_numpy(dtype=float) if es_col in forecast_df else np.full_like(var, np.nan)
         pof = kupiec_pof(actual, var, alpha)
         cc = christoffersen_cc(actual, var, alpha)
         as_test = acerbi_szekely(actual, var, es, alpha)
-
         rows.append(
             {
                 "model": label,
