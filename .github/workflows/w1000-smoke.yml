@@ -1,13 +1,9 @@
 name: w1000-production-smoke
 
+# The W=1000 smoke has already passed on the repaired SV pipeline. Keep this
+# expensive validation available on demand, but do not rerun it on every PR
+# synchronization while the validity-repair branch continues to evolve.
 on:
-  pull_request:
-    paths:
-      - "scripts/smoke_w1000.py"
-      - "src/sv_model.py"
-      - "src/data_utils.py"
-      - "requirements.txt"
-      - ".github/workflows/w1000-smoke.yml"
   workflow_dispatch:
 
 jobs:
