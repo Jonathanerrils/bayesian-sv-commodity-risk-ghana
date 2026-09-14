@@ -7,6 +7,7 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from garch_model import (
+    _ar_recursion_stable,
     _student_t_var_es_multiplier,
     fit_garch,
     forecast_var_es,
@@ -19,6 +20,21 @@ def test_student_t_unit_variance_quantile_and_es_are_sensible():
     q, es = _student_t_var_es_multiplier(0.01, nu=8.0)
     assert q < 0
     assert es > -q
+
+
+def test_egarch_ar_root_test_accepts_stable_q2_that_abs_sum_rule_rejects():
+    # lambda^2 - 1.2 lambda + .3 = 0 has roots ~0.845 and 0.355: stable.
+    # Yet |1.2| + |-0.3| = 1.5, so the old shortcut wrongly rejected it.
+    beta = [1.2, -0.3]
+    roots = np.roots([1.0, -beta[0], -beta[1]])
+    assert np.all(np.abs(roots) < 1.0)
+    assert sum(abs(x) for x in beta) > 1.0
+    assert _ar_recursion_stable(beta)
+
+
+def test_egarch_ar_root_test_rejects_explosive_recursion():
+    assert not _ar_recursion_stable([1.05])
+    assert not _ar_recursion_stable([1.3, 0.2])
 
 
 def test_heavy_tail_benchmark_matrix_is_complete():
@@ -34,7 +50,6 @@ def test_student_t_rolling_forecasts_run_and_es_exceeds_var():
     rng = np.random.default_rng(7)
     idx = pd.date_range("2020-01-01", periods=180, freq="B")
     returns = pd.Series(rng.standard_t(df=7, size=len(idx)) * 0.01, index=idx)
-
     out = rolling_var_es(
         returns,
         model_type="GARCH",
@@ -42,7 +57,6 @@ def test_student_t_rolling_forecasts_run_and_es_exceeds_var():
         window=150,
         alphas=[0.05],
     )
-
     valid = out.loc[~out["estimation_failed"]]
     assert len(valid) > 0
     assert np.isfinite(valid["var_0.05"]).all()
@@ -53,16 +67,10 @@ def test_student_t_rolling_forecasts_run_and_es_exceeds_var():
 def test_asymmetric_egarch_t_fit_exposes_leverage_and_nu_parameters():
     rng = np.random.default_rng(13)
     returns = rng.standard_t(df=8, size=500) * 0.01
-    result = fit_garch(
-        returns,
-        model_type="EGARCH",
-        distribution="t",
-    )
-
+    result = fit_garch(returns, model_type="EGARCH", distribution="t")
     assert result is not None
     assert "gamma[1]" in result.params.index
     assert "nu" in result.params.index
-
     var, es = forecast_var_es(result, 0.05, distribution="t")
     assert np.isfinite(var)
     assert np.isfinite(es)
