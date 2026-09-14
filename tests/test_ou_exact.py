@@ -3,11 +3,17 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
+import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import ou_model
-from ou_model import fit_ou, forecast_ou_var_es, ou_transition_moments
+from ou_model import (
+    aligned_ou_transition_pairs,
+    fit_ou,
+    forecast_ou_var_es,
+    ou_transition_moments,
+)
 
 
 def test_exact_transition_matches_closed_form():
@@ -21,6 +27,29 @@ def test_exact_transition_matches_closed_form():
     expected_var = sigma**2 * (1 - np.exp(-2 * kappa * dt)) / (2 * kappa)
     assert np.isclose(float(mean), expected_mean)
     assert np.isclose(float(var), expected_var)
+
+
+def test_return_pair_alignment_survives_missing_price_gap():
+    dates = pd.date_range("2026-01-01", periods=5, freq="D")
+    prices = pd.Series([100.0, np.nan, 101.0, 102.0, 103.0], index=dates)
+    raw_returns = np.log(prices / prices.shift(1))
+    returns = raw_returns.dropna()
+
+    # Only Jan 4 and Jan 5 have valid returns.  The previous retained return
+    # date is irrelevant: Jan 4 must condition on Jan 3's price (=101), not on
+    # whichever date happens to precede it in the compressed return index.
+    x_prev, x_next = aligned_ou_transition_pairs(prices, returns)
+    assert returns.index.tolist() == [dates[3], dates[4]]
+    assert np.allclose(np.exp(x_prev), [101.0, 102.0])
+    assert np.allclose(np.exp(x_next), [102.0, 103.0])
+    assert np.allclose(x_next - x_prev, returns.to_numpy())
+
+    # The helper must also work if a caller already compressed prices onto the
+    # retained-return index, because x_{t-1} is reconstructed from P_t and r_t.
+    compressed_prices = prices.reindex(returns.index)
+    xp2, xn2 = aligned_ou_transition_pairs(compressed_prices, returns)
+    assert np.allclose(xp2, x_prev)
+    assert np.allclose(xn2, x_next)
 
 
 def test_exact_ou_mle_recovers_synthetic_parameters_reasonably():
@@ -46,9 +75,6 @@ def test_exact_ou_mle_recovers_synthetic_parameters_reasonably():
 
 
 def test_small_kappa_is_valid_estimate_not_estimation_failure(monkeypatch):
-    # The old implementation marked kappa <= .01 as a failed fit, causing OU
-    # dates to be dropped selectively from common-date comparisons.  Numerical
-    # optimizer success and economic mean-reversion strength are separate facts.
     fake = SimpleNamespace(
         success=True,
         x=np.array([np.log(0.005), 4.2, np.log(0.2)]),
