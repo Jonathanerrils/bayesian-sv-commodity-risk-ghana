@@ -1,4 +1,11 @@
-"""Validate and assemble distributed production shards into canonical outputs."""
+"""Validate and assemble distributed production shards into canonical outputs.
+
+The fixed evaluation calendar is preserved for every model.  A row is valid
+only when all primary forecasts are finite and ``estimation_failed`` is false;
+a failed row must be explicitly flagged and contain no finite primary risk
+forecast.  Model availability is reported as an outcome alongside native and
+common-date backtests.
+"""
 
 from __future__ import annotations
 
@@ -19,10 +26,13 @@ from production_runner import (
     BENCHMARK_MODELS,
     COMMODITIES,
     SV_VARIANTS,
+    common_valid_dates,
     compile_results,
     run_key,
     setup_logging,
 )
+
+FORECAST_COLS = ["var_0.01", "es_0.01", "var_0.05", "es_0.05"]
 
 
 def _read_csv(path: Path) -> pd.DataFrame:
@@ -34,6 +44,23 @@ def _read_csv(path: Path) -> pd.DataFrame:
 
 def _candidate_csvs(root: Path) -> list[Path]:
     return sorted(p for p in root.rglob("*.csv") if p.is_file())
+
+
+def _validate_forecast_state(merged: pd.DataFrame, label: str) -> tuple[pd.Series, pd.Series]:
+    values = merged[FORECAST_COLS].apply(pd.to_numeric, errors="coerce")
+    all_finite = np.isfinite(values.to_numpy(dtype=float)).all(axis=1)
+    any_finite = np.isfinite(values.to_numpy(dtype=float)).any(axis=1)
+    failed = merged["estimation_failed"].fillna(True).astype(bool).to_numpy()
+
+    inconsistent_valid = (~failed) & (~all_finite)
+    inconsistent_failed = failed & any_finite
+    if inconsistent_valid.any():
+        bad = merged.loc[inconsistent_valid, "global_i"].astype(int).tolist()[:10]
+        raise RuntimeError(f"{label}: unflagged non-finite forecasts at global_i={bad}")
+    if inconsistent_failed.any():
+        bad = merged.loc[inconsistent_failed, "global_i"].astype(int).tolist()[:10]
+        raise RuntimeError(f"{label}: failed rows contain finite forecasts at global_i={bad}")
+    return pd.Series(~failed & all_finite, index=merged.index), pd.Series(failed, index=merged.index)
 
 
 def assemble(
@@ -49,6 +76,7 @@ def assemble(
         raise RuntimeError(f"No shard CSVs found under {input_dir}")
 
     forecasts: dict[tuple[str, str], pd.DataFrame] = {}
+    availability_rows: list[dict] = []
     diagnostics: dict = {
         "run_key": run_key(window, refit_every, predictive_draws),
         "window": window,
@@ -70,45 +98,37 @@ def assemble(
 
         for model in ALL_MODELS:
             if model in BENCHMARK_MODELS:
-                matches = [
-                    p for p in csvs
-                    if p.name.startswith(f"benchmark__{commodity}__")
-                    and _read_csv(p)["model"].eq(model).all()
-                ]
+                matches = []
+                for p in csvs:
+                    if not p.name.startswith(f"benchmark__{commodity}__"):
+                        continue
+                    candidate = _read_csv(p)
+                    if "model" in candidate and candidate["model"].eq(model).all():
+                        matches.append((p, candidate))
                 if len(matches) != 1:
                     raise RuntimeError(
-                        f"Expected exactly one benchmark shard for {commodity}/{model}; "
-                        f"found {len(matches)}"
+                        f"Expected exactly one benchmark shard for {commodity}/{model}; found {len(matches)}"
                     )
-                merged = _read_csv(matches[0]).copy()
+                merged = matches[0][1].copy()
             else:
                 pieces = []
                 for p in csvs:
                     if not p.name.startswith(f"sv__{commodity}__"):
                         continue
                     df = _read_csv(p)
-                    if df["model"].eq(model).all():
+                    if "model" in df and df["model"].eq(model).all():
                         pieces.append(df)
                 if not pieces:
                     raise RuntimeError(f"No SV shards found for {commodity}/{model}")
                 merged = pd.concat(pieces, ignore_index=True)
 
             required = {
-                "date",
-                "actual_return",
-                "global_i",
-                "commodity",
-                "model",
-                "var_0.01",
-                "es_0.01",
-                "var_0.05",
-                "es_0.05",
+                "date", "actual_return", "global_i", "commodity", "model",
+                "estimation_failed", *FORECAST_COLS,
             }
             missing_cols = required.difference(merged.columns)
             if missing_cols:
-                raise RuntimeError(
-                    f"{commodity}/{model}: missing columns {sorted(missing_cols)}"
-                )
+                raise RuntimeError(f"{commodity}/{model}: missing columns {sorted(missing_cols)}")
             if not merged["commodity"].eq(commodity).all() or not merged["model"].eq(model).all():
                 raise RuntimeError(f"{commodity}/{model}: shard labels are inconsistent")
             if merged["global_i"].duplicated().any():
@@ -121,88 +141,119 @@ def assemble(
                 missing = sorted(set(expected_i).difference(got_i))[:20]
                 extra = sorted(set(got_i).difference(expected_i))[:20]
                 raise RuntimeError(
-                    f"{commodity}/{model}: incomplete coverage; got {len(merged)}/{n_expected}, "
+                    f"{commodity}/{model}: incomplete calendar coverage; got {len(merged)}/{n_expected}, "
                     f"missing={missing}, extra={extra}"
                 )
-
-            got_dates = pd.DatetimeIndex(merged["date"])
-            if not got_dates.equals(expected_dates):
+            if not pd.DatetimeIndex(merged["date"]).equals(expected_dates):
                 raise RuntimeError(f"{commodity}/{model}: forecast dates do not match source data")
-            actual = merged["actual_return"].to_numpy(dtype=float)
-            if not np.allclose(actual, expected_actual, rtol=0.0, atol=1e-12, equal_nan=True):
+            if not np.allclose(
+                merged["actual_return"].to_numpy(dtype=float), expected_actual,
+                rtol=0.0, atol=1e-12, equal_nan=True,
+            ):
                 raise RuntimeError(f"{commodity}/{model}: actual returns disagree with source data")
 
+            valid_mask, failed_mask = _validate_forecast_state(merged, f"{commodity}/{model}")
+
             if model in SV_VARIANTS:
+                if "refit" not in merged:
+                    raise RuntimeError(f"{commodity}/{model}: missing refit column")
                 expected_refits = list(range(0, n_expected, refit_every))
-                refit_i = merged.loc[merged["refit"].fillna(False).astype(bool), "global_i"].astype(int).tolist()
+                refit_rows = merged[merged["refit"].fillna(False).astype(bool)].copy()
+                refit_i = refit_rows["global_i"].astype(int).tolist()
                 if refit_i != expected_refits:
                     raise RuntimeError(
-                        f"{commodity}/{model}: refit schedule mismatch; "
-                        f"expected {expected_refits}, got {refit_i}"
+                        f"{commodity}/{model}: refit schedule mismatch; expected {expected_refits}, got {refit_i}"
                     )
-                refit_rows = merged[merged["refit"].fillna(False).astype(bool)]
-                if refit_rows["mcmc_attempt"].isna().any():
-                    raise RuntimeError(f"{commodity}/{model}: refit missing accepted MCMC attempt")
-                if not (pd.to_numeric(refit_rows["mcmc_max_rhat"]) < 1.01).all():
-                    raise RuntimeError(f"{commodity}/{model}: accepted refit violates R-hat gate")
-                if not (pd.to_numeric(refit_rows["mcmc_min_ess"]) > 400).all():
-                    raise RuntimeError(f"{commodity}/{model}: accepted refit violates ESS gate")
-                if not (pd.to_numeric(refit_rows["mcmc_divergences"]) == 0).all():
-                    raise RuntimeError(f"{commodity}/{model}: accepted refit has divergences")
+                if "mcmc_converged" not in refit_rows:
+                    raise RuntimeError(f"{commodity}/{model}: missing mcmc_converged diagnostics")
+                converged = refit_rows["mcmc_converged"].fillna(False).astype(bool)
+                good = refit_rows[converged]
+                bad = refit_rows[~converged]
+                if len(good):
+                    if good["mcmc_attempt"].isna().any():
+                        raise RuntimeError(f"{commodity}/{model}: converged refit missing accepted attempt")
+                    if not (pd.to_numeric(good["mcmc_max_rhat"]) < 1.01).all():
+                        raise RuntimeError(f"{commodity}/{model}: accepted refit violates R-hat gate")
+                    if not (pd.to_numeric(good["mcmc_min_ess"]) > 400).all():
+                        raise RuntimeError(f"{commodity}/{model}: accepted refit violates ESS gate")
+                    if not (pd.to_numeric(good["mcmc_divergences"]) == 0).all():
+                        raise RuntimeError(f"{commodity}/{model}: accepted refit has divergences")
+                for _, row in bad.iterrows():
+                    block_id = int(row["block_id"])
+                    block_rows = merged[merged["block_id"] == block_id]
+                    if not block_rows["estimation_failed"].fillna(False).astype(bool).all():
+                        raise RuntimeError(
+                            f"{commodity}/{model}: failed refit block {block_id} contains unflagged rows"
+                        )
 
-            forecast_cols = ["var_0.01", "es_0.01", "var_0.05", "es_0.05"]
-            finite_fraction = float(
-                np.isfinite(merged[forecast_cols].to_numpy(dtype=float)).mean()
-            )
-            if finite_fraction < 1.0:
-                raise RuntimeError(
-                    f"{commodity}/{model}: non-finite primary forecasts remain "
-                    f"(finite fraction={finite_fraction:.6f})"
-                )
-
-            fc = merged.drop(columns=["commodity", "model", "shard_kind"], errors="ignore")
-            fc = fc.set_index("date")
+            fc = merged.drop(columns=["commodity", "model", "shard_kind"], errors="ignore").set_index("date")
             forecasts[(commodity, model)] = fc
+            n_valid = int(valid_mask.sum())
+            n_failed = int(failed_mask.sum())
+            availability_rows.append({
+                "commodity": commodity,
+                "model": model,
+                "n_total": int(n_expected),
+                "n_valid": n_valid,
+                "n_failed": n_failed,
+                "availability_rate": float(n_valid / n_expected),
+                "failure_rate": float(n_failed / n_expected),
+            })
 
             key = f"{commodity}/{model}"
             diagnostics["series"][key] = {
-                "n_forecasts": int(len(fc)),
+                "n_forecasts": int(n_expected),
+                "n_valid": n_valid,
+                "n_failed": n_failed,
+                "availability_rate": float(n_valid / n_expected),
                 "start": str(fc.index.min().date()),
                 "end": str(fc.index.max().date()),
-                "finite_fraction": finite_fraction,
             }
             if model in SV_VARIANTS:
-                refits = merged[merged["refit"].fillna(False).astype(bool)]
-                diagnostics["series"][key].update(
-                    {
-                        "n_refits": int(len(refits)),
-                        "fallback_refits": int((pd.to_numeric(refits["mcmc_attempt"]) > 1).sum()),
-                        "max_rhat": float(pd.to_numeric(refits["mcmc_max_rhat"]).max()),
-                        "min_ess": float(pd.to_numeric(refits["mcmc_min_ess"]).min()),
-                        "total_divergences": int(pd.to_numeric(refits["mcmc_divergences"]).sum()),
-                        "min_filter_ess": float(pd.to_numeric(merged["filter_ess"]).min()),
-                        "median_filter_ess": float(pd.to_numeric(merged["filter_ess"]).median()),
-                    }
-                )
+                refits = merged[merged["refit"].fillna(False).astype(bool)].copy()
+                converged = refits["mcmc_converged"].fillna(False).astype(bool)
+                good = refits[converged]
+                diagnostics["series"][key].update({
+                    "n_refits": int(len(refits)),
+                    "converged_refits": int(converged.sum()),
+                    "failed_refits": int((~converged).sum()),
+                    "fallback_refits": int((pd.to_numeric(good["mcmc_attempt"], errors="coerce") > 1).sum()),
+                    "max_rhat_accepted": float(pd.to_numeric(good["mcmc_max_rhat"], errors="coerce").max()) if len(good) else None,
+                    "min_ess_accepted": float(pd.to_numeric(good["mcmc_min_ess"], errors="coerce").min()) if len(good) else None,
+                    "total_divergences_accepted": int(pd.to_numeric(good["mcmc_divergences"], errors="coerce").sum()) if len(good) else 0,
+                    "min_filter_ess_valid": float(pd.to_numeric(merged.loc[valid_mask, "filter_ess"], errors="coerce").min()) if n_valid else None,
+                    "median_filter_ess_valid": float(pd.to_numeric(merged.loc[valid_mask, "filter_ess"], errors="coerce").median()) if n_valid else None,
+                })
 
     output_dir.mkdir(parents=True, exist_ok=True)
+    availability = pd.DataFrame(availability_rows).sort_values(["commodity", "model"])
+    availability.to_csv(output_dir / "forecast_availability.csv", index=False)
+
+    common_rows = []
+    for commodity in COMMODITIES:
+        dates = common_valid_dates(forecasts, commodity)
+        n_total = len(returns_all[commodity]) - window
+        common_rows.append({
+            "commodity": commodity,
+            "n_total_calendar": int(n_total),
+            "n_common_valid": int(len(dates)),
+            "common_valid_fraction": float(len(dates) / n_total),
+        })
+    pd.DataFrame(common_rows).to_csv(output_dir / "common_date_coverage.csv", index=False)
+
     logger = setup_logging(output_dir / "assembly.log")
     primary = compile_results(
-        forecasts,
-        window=window,
-        refit_every=refit_every,
-        predictive_draws=predictive_draws,
-        logger=logger,
+        forecasts, window=window, refit_every=refit_every,
+        predictive_draws=predictive_draws, logger=logger,
     )
 
-    # Copy canonical assembled forecast series into the production artifact.
     forecast_dir = output_dir / "forecasts"
     forecast_dir.mkdir(parents=True, exist_ok=True)
     for (commodity, model), fc in forecasts.items():
         fc.to_csv(forecast_dir / f"{commodity}__{model.replace(' ', '_')}.csv")
 
     diagnostics["primary_rows"] = int(len(primary))
-    diagnostics["status"] = "validated_complete"
+    diagnostics["status"] = "validated_complete_with_availability_reporting"
     (output_dir / "production_validation_summary.json").write_text(
         json.dumps(diagnostics, indent=2), encoding="utf-8"
     )
@@ -217,13 +268,9 @@ def main() -> None:
     parser.add_argument("--refit-every", type=int, default=42)
     parser.add_argument("--predictive-draws", type=int, default=20_000)
     args = parser.parse_args()
-
     diagnostics = assemble(
-        args.input_dir,
-        args.window,
-        args.refit_every,
-        args.predictive_draws,
-        args.output_dir,
+        args.input_dir, args.window, args.refit_every,
+        args.predictive_draws, args.output_dir,
     )
     print(json.dumps({"status": diagnostics["status"], "run_key": diagnostics["run_key"]}, indent=2))
 
