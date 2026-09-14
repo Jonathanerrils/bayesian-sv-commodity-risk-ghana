@@ -1,4 +1,4 @@
-"""Production runner for corrected rolling commodity-risk backtests."""
+"""Production runner for scientifically audited rolling commodity-risk backtests."""
 
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ RESULTS_DIR = PROJECT_ROOT / "outputs" / "v2"
 TABLES_DIR = RESULTS_DIR / "tables"
 CHECKPOINT_ROOT = PROJECT_ROOT / "checkpoints" / "v2"
 
-PIPELINE_VERSION = "risk-pipeline-v3-exact-ou-bonferroni"
+PIPELINE_VERSION = "risk-pipeline-v4-sv-timing-ou-pairs-availability-dual-multiplicity"
 ALPHAS = [0.01, 0.05]
 COMMODITIES = ["cocoa", "gold", "oil"]
 SV_VARIANTS = ["SV-Gaussian", "SV-t", "SV-Leverage", "SV-t-Leverage"]
@@ -37,8 +37,14 @@ GARCH_BENCHMARK_SPECS = {
 }
 BENCHMARK_MODELS = [*GARCH_BENCHMARK_SPECS, "OU", "HistSim"]
 ALL_MODELS = [*BENCHMARK_MODELS, *SV_VARIANTS]
-# The manuscript's comparison-cell family is model x commodity x confidence level.
-BONFERRONI_FAMILY_SIZE = len(ALL_MODELS) * len(COMMODITIES) * len(ALPHAS)
+
+# Two multiplicity families are reported by design, before seeing repaired results.
+# 1) Per-test family: each named test across model x commodity x confidence cells.
+PER_TEST_BONFERRONI_FAMILY_SIZE = len(ALL_MODELS) * len(COMMODITIES) * len(ALPHAS)
+# 2) Global-primary family: all three primary tests across all comparison cells.
+GLOBAL_PRIMARY_BONFERRONI_FAMILY_SIZE = PER_TEST_BONFERRONI_FAMILY_SIZE * 3
+# Backwards-compatible alias; always means the manuscript-style per-test family.
+BONFERRONI_FAMILY_SIZE = PER_TEST_BONFERRONI_FAMILY_SIZE
 
 
 def setup_logging(path: Path) -> logging.Logger:
@@ -53,8 +59,7 @@ def setup_logging(path: Path) -> logging.Logger:
 
 
 def mcmc_policy_label(attempts=None) -> str:
-    if attempts is None:
-        attempts = DEFAULT_ROLLING_MCMC_ATTEMPTS
+    attempts = DEFAULT_ROLLING_MCMC_ATTEMPTS if attempts is None else attempts
     return "-then-".join(
         f"{int(a['chains'])}c{int(a['tune'])}t{int(a['draws'])}d" for a in attempts
     )
@@ -83,8 +88,7 @@ def run_benchmark(commodity, model, returns, prices, window, refit_every, predic
     path = checkpoint_path(commodity, model, window, refit_every, predictive_draws)
     if path.exists():
         existing = load_checkpoint(path)
-        expected = len(returns) - window
-        if len(existing) == expected:
+        if len(existing) == len(returns) - window:
             logger.info("[SKIP] %s/%s: validated checkpoint", commodity, model)
             return existing
         logger.warning("[STALE] %s has wrong row count; recomputing", path)
@@ -92,14 +96,16 @@ def run_benchmark(commodity, model, returns, prices, window, refit_every, predic
     t0 = time.time()
     if model in GARCH_BENCHMARK_SPECS:
         model_type, distribution = GARCH_BENCHMARK_SPECS[model]
-        df = rolling_var_es(returns, model_type=model_type, distribution=distribution, window=window, alphas=ALPHAS)
+        df = rolling_var_es(
+            returns, model_type=model_type, distribution=distribution,
+            window=window, alphas=ALPHAS,
+        )
     elif model == "HistSim":
         df = historical_simulation_var_es(returns, window=window, alphas=ALPHAS)
     elif model == "OU":
         df = rolling_ou_var_es(prices, returns, window=window, alphas=ALPHAS)
     else:
         raise ValueError(f"Unknown benchmark: {model}")
-
     df.to_csv(path)
     logger.info("[DONE] %s/%s: %d forecasts in %.1f min", commodity, model, len(df), (time.time() - t0) / 60)
     return df
@@ -131,8 +137,7 @@ def run_sv(commodity, variant, returns, window, refit_every, predictive_draws, l
 
 
 def _valid_forecast_mask(fc: pd.DataFrame, alphas=None) -> pd.Series:
-    if alphas is None:
-        alphas = ALPHAS
+    alphas = ALPHAS if alphas is None else alphas
     mask = pd.Series(True, index=fc.index, dtype=bool)
     required = ["actual_return"]
     for alpha in alphas:
@@ -147,13 +152,13 @@ def _valid_forecast_mask(fc: pd.DataFrame, alphas=None) -> pd.Series:
 
 
 def common_valid_dates(forecasts: dict, commodity: str) -> pd.DatetimeIndex:
-    model_frames = [fc for (comm, _model), fc in forecasts.items() if comm == commodity]
-    if not model_frames:
+    frames = [fc for (comm, _model), fc in forecasts.items() if comm == commodity]
+    if not frames:
         return pd.DatetimeIndex([])
     common = None
-    for fc in model_frames:
-        valid_idx = pd.DatetimeIndex(fc.index[_valid_forecast_mask(fc)])
-        common = valid_idx if common is None else common.intersection(valid_idx)
+    for fc in frames:
+        idx = pd.DatetimeIndex(fc.index[_valid_forecast_mask(fc)])
+        common = idx if common is None else common.intersection(idx)
     return pd.DatetimeIndex(common).sort_values()
 
 
@@ -173,26 +178,52 @@ def _backtest_rows(forecasts, window, refit_every, predictive_draws, common_date
         bt["refit_every"] = refit_every if model in SV_VARIANTS else 1
         bt["predictive_draws"] = predictive_draws if model in SV_VARIANTS else 0
         bt["pipeline_version"] = PIPELINE_VERSION
-        bt["model_version"] = MODEL_VERSION
+        bt["model_version"] = MODEL_VERSION if model in SV_VARIANTS else "n/a"
         bt["ou_model_version"] = OU_MODEL_VERSION if model == "OU" else "n/a"
         bt["mcmc_policy"] = mcmc_policy_label() if model in SV_VARIANTS else "n/a"
         rows.append(bt)
     return pd.concat(rows, ignore_index=True)
 
 
-def _summary_table(results: pd.DataFrame, bonferroni: bool = False) -> pd.DataFrame:
+def _add_dual_bonferroni(results: pd.DataFrame) -> pd.DataFrame:
+    """Report both pre-declared multiplicity families without choosing post hoc."""
+    per_test = apply_bonferroni_reporting(results, PER_TEST_BONFERRONI_FAMILY_SIZE)
+    global_primary = apply_bonferroni_reporting(results, GLOBAL_PRIMARY_BONFERRONI_FAMILY_SIZE)
+    out = per_test.copy()
+    corrected_cols = [
+        c for c in global_primary.columns
+        if c.endswith("_bonferroni")
+        or c in {"bonferroni_family_size", "bonferroni_alpha", "as_bonferroni_decision", "as_bonferroni_decision_stable"}
+    ]
+    for col in corrected_cols:
+        out[f"{col}_global_primary"] = global_primary[col].values
+    out["multiplicity_per_test_family_size"] = PER_TEST_BONFERRONI_FAMILY_SIZE
+    out["multiplicity_global_primary_family_size"] = GLOBAL_PRIMARY_BONFERRONI_FAMILY_SIZE
+    return out
+
+
+def _summary_table(results: pd.DataFrame, scheme: str = "raw") -> pd.DataFrame:
     grouped = results.groupby(["commodity", "model"], sort=True)
-    if bonferroni:
-        cols = ["kupiec_passed_bonferroni", "cc_passed_bonferroni", "as_passed_bonferroni"]
-    else:
+    if scheme == "raw":
         cols = ["kupiec_passed", "cc_passed", "as_passed"]
+    elif scheme == "per_test":
+        cols = ["kupiec_passed_bonferroni", "cc_passed_bonferroni", "as_passed_bonferroni"]
+    elif scheme == "global_primary":
+        cols = [
+            "kupiec_passed_bonferroni_global_primary",
+            "cc_passed_bonferroni_global_primary",
+            "as_passed_bonferroni_global_primary",
+        ]
+    else:
+        raise ValueError(f"Unknown summary scheme: {scheme}")
     summary = grouped[cols].sum()
-    summary["primary_tests_passed"] = summary.sum(axis=1)
+    summary["primary_nonrejections"] = summary.sum(axis=1)
     summary["primary_tests_total"] = grouped.size() * 3
-    summary["independence_passed"] = grouped["ind_passed"].sum()
+    summary["independence_nonrejections"] = grouped["ind_passed"].sum()
     summary["independence_total"] = grouped.size()
     summary["n_obs_min"] = grouped["n_obs"].min()
     summary["n_obs_max"] = grouped["n_obs"].max()
+    summary["scheme"] = scheme
     return summary.reset_index()
 
 
@@ -200,36 +231,42 @@ def compile_results(forecasts, window, refit_every, predictive_draws, logger) ->
     out_dir = TABLES_DIR / run_key(window, refit_every, predictive_draws)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    native = _backtest_rows(forecasts, window, refit_every, predictive_draws, common_dates=False)
-    primary = _backtest_rows(forecasts, window, refit_every, predictive_draws, common_dates=True)
-    native = apply_bonferroni_reporting(native, BONFERRONI_FAMILY_SIZE)
-    primary = apply_bonferroni_reporting(primary, BONFERRONI_FAMILY_SIZE)
+    native = _add_dual_bonferroni(
+        _backtest_rows(forecasts, window, refit_every, predictive_draws, common_dates=False)
+    )
+    primary = _add_dual_bonferroni(
+        _backtest_rows(forecasts, window, refit_every, predictive_draws, common_dates=True)
+    )
 
     primary.to_csv(out_dir / "full_backtest_results.csv", index=False)
     primary.to_csv(out_dir / "full_backtest_results_common_dates.csv", index=False)
     native.to_csv(out_dir / "full_backtest_results_native.csv", index=False)
-    _summary_table(primary).to_csv(out_dir / "summary_pass_counts.csv", index=False)
-    _summary_table(primary).to_csv(out_dir / "summary_pass_counts_common_dates.csv", index=False)
-    _summary_table(native).to_csv(out_dir / "summary_pass_counts_native.csv", index=False)
-    _summary_table(primary, bonferroni=True).to_csv(out_dir / "summary_pass_counts_bonferroni.csv", index=False)
-    _summary_table(native, bonferroni=True).to_csv(out_dir / "summary_pass_counts_native_bonferroni.csv", index=False)
+    _summary_table(primary, "raw").to_csv(out_dir / "summary_nonrejections.csv", index=False)
+    _summary_table(native, "raw").to_csv(out_dir / "summary_nonrejections_native.csv", index=False)
+    _summary_table(primary, "per_test").to_csv(out_dir / "summary_nonrejections_bonferroni_per_test.csv", index=False)
+    _summary_table(native, "per_test").to_csv(out_dir / "summary_nonrejections_native_bonferroni_per_test.csv", index=False)
+    _summary_table(primary, "global_primary").to_csv(out_dir / "summary_nonrejections_bonferroni_global_primary.csv", index=False)
+    _summary_table(native, "global_primary").to_csv(out_dir / "summary_nonrejections_native_bonferroni_global_primary.csv", index=False)
 
     for commodity in sorted({c for c, _m in forecasts}):
         n_common = len(common_valid_dates(forecasts, commodity))
         logger.info(
             "[COMMON-DATE] %s: %d dates retained across %d models",
-            commodity,
-            n_common,
-            sum(1 for c, _m in forecasts if c == commodity),
+            commodity, n_common, sum(1 for c, _m in forecasts if c == commodity),
         )
         if n_common == 0:
-            raise RuntimeError(f"No common valid forecast dates remain for {commodity}; primary model comparison is undefined.")
+            raise RuntimeError(
+                f"No common valid forecast dates remain for {commodity}; common-date comparison is undefined."
+            )
 
     logger.info(
-        "Bonferroni comparison-cell family: m=%d, corrected alpha=%.8f",
-        BONFERRONI_FAMILY_SIZE,
-        0.05 / BONFERRONI_FAMILY_SIZE,
+        "Multiplicity families: per-test m=%d (alpha=%.8f); global-primary m=%d (alpha=%.8f)",
+        PER_TEST_BONFERRONI_FAMILY_SIZE,
+        0.05 / PER_TEST_BONFERRONI_FAMILY_SIZE,
+        GLOBAL_PRIMARY_BONFERRONI_FAMILY_SIZE,
+        0.05 / GLOBAL_PRIMARY_BONFERRONI_FAMILY_SIZE,
     )
+    logger.info("Non-rejection is not evidence of adequacy; availability is reported separately.")
     logger.info("Backtest tables saved under %s", out_dir)
     return primary
 
@@ -259,13 +296,8 @@ def main():
     logger = setup_logging(log_path)
     logger.info(
         "Run config: commodities=%s window=%d refit=%d predictive=%d pipeline=%s sv=%s ou=%s",
-        commodities,
-        args.window,
-        args.refit_every,
-        args.predictive_draws,
-        PIPELINE_VERSION,
-        MODEL_VERSION,
-        OU_MODEL_VERSION,
+        commodities, args.window, args.refit_every, args.predictive_draws,
+        PIPELINE_VERSION, MODEL_VERSION, OU_MODEL_VERSION,
     )
     logger.info("Rolling MCMC policy: %s", mcmc_policy_label())
 
@@ -274,16 +306,20 @@ def main():
     forecasts = {}
     for commodity in commodities:
         returns = returns_all[commodity]
-        prices = prices_all[commodity].reindex(returns.index).ffill()
+        # Preserve the full price index. OU aligns each retained return to its
+        # exact conditioning/current price pair internally.
+        prices = prices_all[commodity]
         if not args.sv_only:
             for model in BENCHMARK_MODELS:
                 forecasts[(commodity, model)] = run_benchmark(
-                    commodity, model, returns, prices, args.window, args.refit_every, args.predictive_draws, logger
+                    commodity, model, returns, prices,
+                    args.window, args.refit_every, args.predictive_draws, logger,
                 )
         if not args.benchmark_only:
             for variant in SV_VARIANTS:
                 forecasts[(commodity, variant)] = run_sv(
-                    commodity, variant, returns, args.window, args.refit_every, args.predictive_draws, logger
+                    commodity, variant, returns,
+                    args.window, args.refit_every, args.predictive_draws, logger,
                 )
     if forecasts:
         compile_results(forecasts, args.window, args.refit_every, args.predictive_draws, logger)
