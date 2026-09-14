@@ -1,9 +1,9 @@
 """Validate and assemble distributed production shards into canonical outputs.
 
-The fixed evaluation calendar is preserved for every model.  A row is valid
+The fixed evaluation calendar is preserved for every model. A row is valid
 only when all primary forecasts are finite and ``estimation_failed`` is false;
 a failed row must be explicitly flagged and contain no finite primary risk
-forecast.  Model availability is reported as an outcome alongside native and
+forecast. Model availability is reported as an outcome alongside native and
 common-date backtests.
 """
 
@@ -46,12 +46,32 @@ def _candidate_csvs(root: Path) -> list[Path]:
     return sorted(p for p in root.rglob("*.csv") if p.is_file())
 
 
+def _bool_series(series: pd.Series, *, na_value: bool, label: str) -> pd.Series:
+    """Parse bool/object/string CSV columns without treating 'False' as truthy."""
+    def parse(value):
+        if pd.isna(value):
+            return na_value
+        if isinstance(value, (bool, np.bool_)):
+            return bool(value)
+        if isinstance(value, (int, np.integer)) and value in (0, 1):
+            return bool(value)
+        text = str(value).strip().lower()
+        if text in {"true", "1"}:
+            return True
+        if text in {"false", "0"}:
+            return False
+        raise RuntimeError(f"{label}: cannot parse boolean value {value!r}")
+    return series.map(parse).astype(bool)
+
+
 def _validate_forecast_state(merged: pd.DataFrame, label: str) -> tuple[pd.Series, pd.Series]:
     values = merged[FORECAST_COLS].apply(pd.to_numeric, errors="coerce")
     all_finite = np.isfinite(values.to_numpy(dtype=float)).all(axis=1)
     any_finite = np.isfinite(values.to_numpy(dtype=float)).any(axis=1)
-    failed = merged["estimation_failed"].fillna(True).astype(bool).to_numpy()
-
+    failed = _bool_series(
+        merged["estimation_failed"], na_value=True,
+        label=f"{label}/estimation_failed",
+    ).to_numpy()
     inconsistent_valid = (~failed) & (~all_finite)
     inconsistent_failed = failed & any_finite
     if inconsistent_valid.any():
@@ -63,13 +83,7 @@ def _validate_forecast_state(merged: pd.DataFrame, label: str) -> tuple[pd.Serie
     return pd.Series(~failed & all_finite, index=merged.index), pd.Series(failed, index=merged.index)
 
 
-def assemble(
-    input_dir: Path,
-    window: int,
-    refit_every: int,
-    predictive_draws: int,
-    output_dir: Path,
-) -> dict:
+def assemble(input_dir: Path, window: int, refit_every: int, predictive_draws: int, output_dir: Path) -> dict:
     returns_all = load_all_returns(verbose=False)
     csvs = _candidate_csvs(input_dir)
     if not csvs:
@@ -157,8 +171,12 @@ def assemble(
             if model in SV_VARIANTS:
                 if "refit" not in merged:
                     raise RuntimeError(f"{commodity}/{model}: missing refit column")
+                refit_flags = _bool_series(
+                    merged["refit"], na_value=False,
+                    label=f"{commodity}/{model}/refit",
+                )
                 expected_refits = list(range(0, n_expected, refit_every))
-                refit_rows = merged[merged["refit"].fillna(False).astype(bool)].copy()
+                refit_rows = merged[refit_flags].copy()
                 refit_i = refit_rows["global_i"].astype(int).tolist()
                 if refit_i != expected_refits:
                     raise RuntimeError(
@@ -166,7 +184,10 @@ def assemble(
                     )
                 if "mcmc_converged" not in refit_rows:
                     raise RuntimeError(f"{commodity}/{model}: missing mcmc_converged diagnostics")
-                converged = refit_rows["mcmc_converged"].fillna(False).astype(bool)
+                converged = _bool_series(
+                    refit_rows["mcmc_converged"], na_value=False,
+                    label=f"{commodity}/{model}/mcmc_converged",
+                )
                 good = refit_rows[converged]
                 bad = refit_rows[~converged]
                 if len(good):
@@ -178,10 +199,14 @@ def assemble(
                         raise RuntimeError(f"{commodity}/{model}: accepted refit violates ESS gate")
                     if not (pd.to_numeric(good["mcmc_divergences"]) == 0).all():
                         raise RuntimeError(f"{commodity}/{model}: accepted refit has divergences")
+                failed_flags = _bool_series(
+                    merged["estimation_failed"], na_value=True,
+                    label=f"{commodity}/{model}/estimation_failed",
+                )
                 for _, row in bad.iterrows():
                     block_id = int(row["block_id"])
-                    block_rows = merged[merged["block_id"] == block_id]
-                    if not block_rows["estimation_failed"].fillna(False).astype(bool).all():
+                    block_mask = merged["block_id"] == block_id
+                    if not failed_flags[block_mask].all():
                         raise RuntimeError(
                             f"{commodity}/{model}: failed refit block {block_id} contains unflagged rows"
                         )
@@ -210,8 +235,9 @@ def assemble(
                 "end": str(fc.index.max().date()),
             }
             if model in SV_VARIANTS:
-                refits = merged[merged["refit"].fillna(False).astype(bool)].copy()
-                converged = refits["mcmc_converged"].fillna(False).astype(bool)
+                refit_flags = _bool_series(merged["refit"], na_value=False, label=f"{key}/refit")
+                refits = merged[refit_flags].copy()
+                converged = _bool_series(refits["mcmc_converged"], na_value=False, label=f"{key}/mcmc_converged")
                 good = refits[converged]
                 diagnostics["series"][key].update({
                     "n_refits": int(len(refits)),
@@ -226,8 +252,9 @@ def assemble(
                 })
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    availability = pd.DataFrame(availability_rows).sort_values(["commodity", "model"])
-    availability.to_csv(output_dir / "forecast_availability.csv", index=False)
+    pd.DataFrame(availability_rows).sort_values(["commodity", "model"]).to_csv(
+        output_dir / "forecast_availability.csv", index=False
+    )
 
     common_rows = []
     for commodity in COMMODITIES:
