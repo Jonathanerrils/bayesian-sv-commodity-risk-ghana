@@ -11,6 +11,12 @@ the exact transition over dt is
         sigma^2 (1-exp(-2 kappa dt)) / (2 kappa),
     ).
 
+Rolling estimation is performed on the exact price transition pairs underlying
+the retained log-return observations.  This matters when the cleaned return
+series contains gaps: the forecast for log(P_t/P_{t-1}) must condition on the
+actual P_{t-1}, not on the previous date that happens to remain in the cleaned
+return index.
+
 Numerical estimation success is deliberately separated from the economic
 strength of mean reversion.  A small positive kappa is a valid OU estimate and
 must not be treated as a missing forecast merely because its half-life is long.
@@ -22,7 +28,7 @@ import numpy as np
 import pandas as pd
 from scipy import optimize, stats
 
-OU_MODEL_VERSION = "ou-exact-v3-convergence-separated"
+OU_MODEL_VERSION = "ou-exact-v4-transition-pairs"
 MEAN_REVERSION_DETECTION_KAPPA = 0.01
 
 
@@ -31,33 +37,42 @@ def ou_transition_moments(
     kappa: float,
     theta: float,
     sigma: float,
-    dt: float = 1 / 252,
+    dt: np.ndarray | float = 1 / 252,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Return exact OU conditional mean and variance."""
-    if kappa <= 0 or sigma <= 0 or dt <= 0:
-        raise ValueError("kappa, sigma and dt must be positive")
+    """Return exact OU conditional mean and variance for scalar/array dt."""
+    if kappa <= 0 or sigma <= 0:
+        raise ValueError("kappa and sigma must be positive")
     x_prev = np.asarray(x_prev, dtype=float)
-    decay = np.exp(-kappa * dt)
+    dt_arr = np.asarray(dt, dtype=float)
+    if not np.isfinite(dt_arr).all() or np.any(dt_arr <= 0):
+        raise ValueError("dt must be finite and positive")
+    decay = np.exp(-kappa * dt_arr)
     mean = theta + (x_prev - theta) * decay
-    variance = sigma**2 * (-np.expm1(-2.0 * kappa * dt)) / (2.0 * kappa)
-    return mean, np.broadcast_to(variance, np.shape(mean)).astype(float)
+    variance = sigma**2 * (-np.expm1(-2.0 * kappa * dt_arr)) / (2.0 * kappa)
+    mean, variance = np.broadcast_arrays(mean, variance)
+    return mean.astype(float), variance.astype(float)
 
 
-def _initial_guess(x: np.ndarray, dt: float) -> tuple[float, float, float]:
-    """AR(1)-based starting values for exact OU maximum likelihood."""
-    x0 = x[:-1]
-    x1 = x[1:]
-    theta0 = float(np.mean(x))
-    denom = float(np.sum((x0 - x0.mean()) ** 2))
-    if denom > 0:
-        a0 = float(np.sum((x0 - x0.mean()) * (x1 - x1.mean())) / denom)
-    else:
-        a0 = 0.99
-    a0 = float(np.clip(a0, 1e-6, 0.999999))
-    kappa0 = float(max(-np.log(a0) / dt, 1e-6))
-    residual = x1 - (theta0 + (x0 - theta0) * np.exp(-kappa0 * dt))
+def _initial_guess_transitions(
+    x_prev: np.ndarray,
+    x_next: np.ndarray,
+    dt: np.ndarray | float,
+) -> tuple[float, float, float]:
+    """AR(1)-style starting values for transition-pair OU likelihood."""
+    theta0 = float(np.mean(np.concatenate([x_prev, x_next])))
+    xp = x_prev - x_prev.mean()
+    xn = x_next - x_next.mean()
+    denom = float(np.sum(xp**2))
+    a0 = float(np.sum(xp * xn) / denom) if denom > 0 else 0.99
+    a0 = float(np.clip(a0, 1e-8, 0.9999999))
+    dt_arr = np.asarray(dt, dtype=float)
+    dt_typical = float(np.median(dt_arr)) if dt_arr.ndim else float(dt_arr)
+    kappa0 = float(max(-np.log(a0) / dt_typical, 1e-7))
+    mean0, _ = ou_transition_moments(x_prev, kappa0, theta0, 1.0, dt)
+    residual = x_next - mean0
     innovation_var = float(np.var(residual, ddof=1)) if len(residual) > 1 else 1e-8
-    scale_factor = -np.expm1(-2.0 * kappa0 * dt) / (2.0 * kappa0)
+    unit_var = -np.expm1(-2.0 * kappa0 * dt_arr) / (2.0 * kappa0)
+    scale_factor = float(np.mean(unit_var))
     sigma0 = float(np.sqrt(max(innovation_var / max(scale_factor, 1e-16), 1e-12)))
     return kappa0, theta0, sigma0
 
@@ -76,13 +91,31 @@ def _failure_result() -> dict:
     }
 
 
-def fit_ou(prices: np.ndarray, dt: float = 1 / 252) -> dict:
-    """Fit the exact OU transition density by numerical maximum likelihood."""
-    x = np.asarray(prices, dtype=float)
-    if len(x) < 30 or not np.isfinite(x).all() or dt <= 0:
+def fit_ou_transitions(
+    x_prev: np.ndarray,
+    x_next: np.ndarray,
+    dt: np.ndarray | float = 1 / 252,
+) -> dict:
+    """Fit exact OU MLE to observed transition pairs (x_prev -> x_next)."""
+    x_prev = np.asarray(x_prev, dtype=float)
+    x_next = np.asarray(x_next, dtype=float)
+    if (
+        x_prev.ndim != 1
+        or x_next.ndim != 1
+        or len(x_prev) != len(x_next)
+        or len(x_prev) < 29
+        or not np.isfinite(x_prev).all()
+        or not np.isfinite(x_next).all()
+    ):
         return _failure_result()
 
-    kappa0, theta0, sigma0 = _initial_guess(x, dt)
+    dt_arr = np.asarray(dt, dtype=float)
+    if dt_arr.ndim > 0 and dt_arr.size not in (1, len(x_prev)):
+        return _failure_result()
+    if not np.isfinite(dt_arr).all() or np.any(dt_arr <= 0):
+        return _failure_result()
+
+    kappa0, theta0, sigma0 = _initial_guess_transitions(x_prev, x_next, dt)
 
     def neg_log_likelihood(params: np.ndarray) -> float:
         log_kappa, theta, log_sigma = params
@@ -90,13 +123,13 @@ def fit_ou(prices: np.ndarray, dt: float = 1 / 252) -> dict:
         sigma = float(np.exp(log_sigma))
         try:
             mean, variance = ou_transition_moments(
-                x[:-1], kappa=kappa, theta=float(theta), sigma=sigma, dt=dt
+                x_prev, kappa=kappa, theta=float(theta), sigma=sigma, dt=dt
             )
         except ValueError:
             return 1e100
         if not np.isfinite(variance).all() or np.any(variance <= 0):
             return 1e100
-        ll = stats.norm.logpdf(x[1:], loc=mean, scale=np.sqrt(variance))
+        ll = stats.norm.logpdf(x_next, loc=mean, scale=np.sqrt(variance))
         nll = -float(np.sum(ll))
         return nll if np.isfinite(nll) else 1e100
 
@@ -124,22 +157,30 @@ def fit_ou(prices: np.ndarray, dt: float = 1 / 252) -> dict:
             return _failure_result()
 
         half_life_years = float(np.log(2.0) / kappa)
-        mean_reversion_detected = bool(kappa > MEAN_REVERSION_DETECTION_KAPPA)
         return {
             "kappa": kappa,
             "theta": float(theta),
             "sigma": sigma,
             "log_likelihood": log_likelihood,
             "optimizer_converged": True,
-            # Backwards-compatible name: convergence now means estimation
-            # convergence only, not an economic threshold on kappa.
             "converged": True,
-            "mean_reversion_detected": mean_reversion_detected,
+            "mean_reversion_detected": bool(kappa > MEAN_REVERSION_DETECTION_KAPPA),
             "half_life_years": half_life_years,
             "model_version": OU_MODEL_VERSION,
         }
     except Exception:
         return _failure_result()
+
+
+def fit_ou(prices: np.ndarray, dt: np.ndarray | float = 1 / 252) -> dict:
+    """Backwards-compatible exact OU fit to a contiguous price-level vector."""
+    x = np.asarray(prices, dtype=float)
+    if len(x) < 30 or not np.isfinite(x).all():
+        return _failure_result()
+    dt_for_pairs = dt
+    if np.asarray(dt).ndim > 0 and np.asarray(dt).size == len(x):
+        dt_for_pairs = np.asarray(dt)[1:]
+    return fit_ou_transitions(x[:-1], x[1:], dt=dt_for_pairs)
 
 
 def forecast_ou_var_es(
@@ -164,6 +205,38 @@ def forecast_ou_var_es(
     return float(var), float(es)
 
 
+def aligned_ou_transition_pairs(
+    prices: pd.Series,
+    returns: pd.Series,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Map each retained return to its exact underlying log-price pair.
+
+    ``returns`` must have been computed as log(prices/prices.shift(1)) and then
+    had missing rows dropped.  The validation below deliberately fails loudly
+    if a caller supplies a price/return combination with different semantics.
+    """
+    if not prices.index.is_monotonic_increasing or not returns.index.is_monotonic_increasing:
+        raise ValueError("prices and returns must have sorted indices")
+    current = prices.reindex(returns.index).to_numpy(dtype=float)
+    previous = prices.shift(1).reindex(returns.index).to_numpy(dtype=float)
+    if (
+        not np.isfinite(current).all()
+        or not np.isfinite(previous).all()
+        or np.any(current <= 0)
+        or np.any(previous <= 0)
+    ):
+        raise ValueError("retained return dates must map to positive finite price pairs")
+    reconstructed = np.log(current / previous)
+    observed = returns.to_numpy(dtype=float)
+    if not np.allclose(reconstructed, observed, rtol=1e-10, atol=1e-12):
+        max_err = float(np.max(np.abs(reconstructed - observed)))
+        raise ValueError(
+            "prices/returns are not transition-aligned; "
+            f"maximum log-return disagreement={max_err:.3e}"
+        )
+    return np.log(previous), np.log(current)
+
+
 def rolling_ou_var_es(
     prices: pd.Series,
     returns: pd.Series,
@@ -171,41 +244,41 @@ def rolling_ou_var_es(
     alphas: list | None = None,
     dt: float = 1 / 252,
 ) -> pd.DataFrame:
-    """Rolling exact-OU VaR/ES; weak mean reversion remains a valid forecast."""
+    """Rolling exact-OU VaR/ES on the transitions underlying return observations."""
     if alphas is None:
         alphas = [0.01, 0.05]
+    if len(returns) <= window:
+        raise ValueError(f"Series length ({len(returns)}) must exceed window ({window})")
 
-    log_prices = np.log(prices.to_numpy(dtype=float))
+    x_prev, x_next = aligned_ou_transition_pairs(prices, returns)
     return_arr = returns.to_numpy(dtype=float)
     dates = returns.index
-    n = len(log_prices)
-    if n != len(return_arr):
-        raise ValueError("prices and returns must be aligned to the same length")
-    if n <= window:
-        raise ValueError(f"Series length ({n}) must exceed window ({window})")
-
-    n_forecasts = n - window
+    n_forecasts = len(return_arr) - window
     results = []
     n_failures = 0
     n_weak_reversion = 0
 
     for i in range(n_forecasts):
-        train_logp = log_prices[i : i + window]
-        current_logp = log_prices[i + window - 1]
-        actual_return = return_arr[i + window]
-        forecast_date = dates[i + window]
+        target = i + window
+        fitted = fit_ou_transitions(
+            x_prev[i:target],
+            x_next[i:target],
+            dt=dt,
+        )
+        current_logp = x_prev[target]
+        actual_return = return_arr[target]
+        forecast_date = dates[target]
 
         row = {
             "date": forecast_date,
             "actual_return": actual_return,
             "estimation_failed": False,
             "ou_model_version": OU_MODEL_VERSION,
+            "ou_kappa": fitted["kappa"],
+            "ou_half_life_years": fitted["half_life_years"],
+            "ou_mean_reversion_detected": fitted["mean_reversion_detected"],
+            "ou_optimizer_converged": fitted["optimizer_converged"],
         }
-        fitted = fit_ou(train_logp, dt=dt)
-        row["ou_kappa"] = fitted["kappa"]
-        row["ou_half_life_years"] = fitted["half_life_years"]
-        row["ou_mean_reversion_detected"] = fitted["mean_reversion_detected"]
-        row["ou_optimizer_converged"] = fitted["optimizer_converged"]
 
         if not fitted["optimizer_converged"]:
             n_failures += 1
