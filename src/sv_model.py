@@ -1,14 +1,22 @@
-"""Bayesian stochastic-volatility models and adaptive rolling VaR/ES forecasts.
+"""Bayesian stochastic-volatility models and rolling VaR/ES forecasts.
 
-The rolling implementation deliberately separates two operations:
+The model uses an innovation-noncentred AR(1) state parameterisation and an
+explicit forecast-date state convention.
 
-* structural parameters are re-estimated by MCMC every ``refit_every`` days;
-* the latent volatility state is filtered after every realised return.
+For a mean-adjusted return x_t, the symmetric state equation is
 
-This avoids stale 42-day forecast blocks while retaining the computational
-benefit of infrequent MCMC refits. Rolling MCMC itself is adaptive: each refit
-starts with the empirically validated 4-chain / 1,000-draw configuration and is
-retried at 4 chains / 2,000 draws only when the strict convergence gate fails.
+    x_t = exp(h_t / 2) * epsilon_t
+    h_{t+1} = mu + phi * (h_t - mu) + sigma_eta * eta_t
+
+For leverage variants, epsilon_t and eta_t are correlated through rho.  Thus a
+negative return shock can alter the distribution of h_{t+1}; the return at t is
+not correlated with the innovation that created h_t.  This is the standard
+forward leverage timing used in the stochastic-volatility literature.
+
+A rolling fit over T observed returns contains states h_0,...,h_T.  The final
+posterior state h_T is therefore the state for the next forecast date.  Daily
+filtering forecasts from h_t first, then conditions on the realised return to
+infer eta_t and propagates to h_{t+1}.
 """
 
 from __future__ import annotations
@@ -20,18 +28,22 @@ import arviz as az
 import numpy as np
 import pandas as pd
 import pymc as pm
+import pytensor
 import pytensor.tensor as pt
 from scipy import stats
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 
 RHAT_THRESHOLD = 1.01
+MIN_STRUCTURAL_ESS = 400
 FAST_MIN_ESS = 200
-MODEL_VERSION = "sv-filter-v2-adaptive-mcmc"
+MODEL_VERSION = "sv-filter-v3-standard-leverage-noncentered"
 DEFAULT_ROLLING_MCMC_ATTEMPTS = (
     {"chains": 4, "tune": 1_000, "draws": 1_000},
     {"chains": 4, "tune": 2_000, "draws": 2_000},
 )
+
+STRUCTURAL_DIAGNOSTIC_VARS = ("mu", "phi", "sigma_eta", "nu", "rho")
 
 
 def _nu_prior(name: str = "nu"):
@@ -41,99 +53,96 @@ def _nu_prior(name: str = "nu"):
 
 
 def _pt_unit_variance_t_scale(nu):
-    """PyTensor scale multiplier making a Student-t innovation unit variance."""
+    """PyTensor multiplier making a Student-t innovation unit variance."""
     return pt.sqrt((nu - 2.0) / nu)
 
 
 def _np_unit_variance_t_scale(nu):
+    """NumPy multiplier making a Student-t innovation unit variance."""
     nu = np.asarray(nu, dtype=float)
     return np.sqrt((nu - 2.0) / nu)
 
 
-def _stationary_first_innovation(z, phi):
-    """Innovation associated with the stationary initial AR(1) state."""
-    first = pt.sqrt(pt.clip(1.0 - phi**2, 1e-9, 1.0)) * z[0]
-    rest = z[1:] - phi * z[:-1]
-    return pt.concatenate([[first], rest])
+def _noncentered_state_path(mu, phi, sigma_eta, T: int):
+    """Construct h_0,...,h_T from independent standard-normal innovations.
+
+    The initial state is stationary.  ``eta[t]`` is the standardised volatility
+    innovation taking h_t to h_{t+1}.  Keeping eta independent a priori avoids
+    the strong latent-state/scale geometry induced by directly sampling a long
+    centred AR(1) path.
+    """
+    h0_std = pm.Normal("h0_std", mu=0.0, sigma=1.0)
+    eta = pm.Normal("eta", mu=0.0, sigma=1.0, shape=T)
+    stationary_sd = sigma_eta / pt.sqrt(pt.clip(1.0 - phi**2, 1e-8, np.inf))
+    h0 = mu + stationary_sd * h0_std
+
+    def step(eta_t, h_prev, mu_, phi_, sigma_):
+        return mu_ + phi_ * (h_prev - mu_) + sigma_ * eta_t
+
+    h_rest, _ = pytensor.scan(
+        fn=step,
+        sequences=[eta],
+        outputs_info=[h0],
+        non_sequences=[mu, phi, sigma_eta],
+        strict=True,
+    )
+    h = pm.Deterministic("h", pt.concatenate([h0[None], h_rest]))
+    return h, eta
+
+
+def _common_parameters(T: int):
+    mu = pm.Normal("mu", mu=-10.0, sigma=3.0)
+    phi_raw = pm.Beta("phi_raw", alpha=20.0, beta=1.5)
+    phi = pm.Deterministic("phi", 2.0 * phi_raw - 1.0)
+    sigma_eta = pm.HalfCauchy("sigma_eta", beta=0.5)
+    h, eta = _noncentered_state_path(mu, phi, sigma_eta, T)
+    return mu, phi, sigma_eta, h, eta
 
 
 def build_sv_gaussian(returns: np.ndarray, T: int) -> pm.Model:
     with pm.Model() as model:
-        mu = pm.Normal("mu", mu=-10, sigma=3)
-        phi_raw = pm.Beta("phi_raw", alpha=20, beta=1.5)
-        phi = pm.Deterministic("phi", 2 * phi_raw - 1)
-        sigma = pm.HalfCauchy("sigma_eta", beta=0.5)
-        z = pm.AR(
-            "z", rho=phi, sigma=1.0,
-            init_dist=pm.Normal.dist(0, 1 / pt.sqrt(1 - phi**2 + 1e-6)),
-            shape=T,
-        )
-        h = pm.Deterministic("h", mu + sigma * z)
-        pm.Normal("obs", mu=0, sigma=pt.exp(h / 2), observed=returns)
+        _mu, _phi, _sigma, h, _eta = _common_parameters(T)
+        vol = pt.exp(h[:-1] / 2.0)
+        pm.Normal("obs", mu=0.0, sigma=vol, observed=returns)
     return model
 
 
 def build_sv_t(returns: np.ndarray, T: int) -> pm.Model:
     with pm.Model() as model:
-        mu = pm.Normal("mu", mu=-10, sigma=3)
-        phi_raw = pm.Beta("phi_raw", alpha=20, beta=1.5)
-        phi = pm.Deterministic("phi", 2 * phi_raw - 1)
-        sigma = pm.HalfCauchy("sigma_eta", beta=0.5)
+        _mu, _phi, _sigma, h, _eta = _common_parameters(T)
         nu = _nu_prior()
-        z = pm.AR(
-            "z", rho=phi, sigma=1.0,
-            init_dist=pm.Normal.dist(0, 1 / pt.sqrt(1 - phi**2 + 1e-6)),
-            shape=T,
-        )
-        h = pm.Deterministic("h", mu + sigma * z)
-        obs_scale = pt.exp(h / 2) * _pt_unit_variance_t_scale(nu)
-        pm.StudentT("obs", nu=nu, mu=0, sigma=obs_scale, observed=returns)
+        vol = pt.exp(h[:-1] / 2.0)
+        obs_scale = vol * _pt_unit_variance_t_scale(nu)
+        pm.StudentT("obs", nu=nu, mu=0.0, sigma=obs_scale, observed=returns)
     return model
 
 
 def build_sv_leverage(returns: np.ndarray, T: int) -> pm.Model:
+    """Gaussian SV with corr(epsilon_t, eta_t)=rho and h_{t+1} timing."""
     with pm.Model() as model:
-        mu = pm.Normal("mu", mu=-10, sigma=3)
-        phi_raw = pm.Beta("phi_raw", alpha=20, beta=1.5)
-        phi = pm.Deterministic("phi", 2 * phi_raw - 1)
-        sigma = pm.HalfCauchy("sigma_eta", beta=0.5)
-        rho = pm.Uniform("rho", lower=-1, upper=1)
-        z = pm.AR(
-            "z", rho=phi, sigma=1.0,
-            init_dist=pm.Normal.dist(0, 1 / pt.sqrt(1 - phi**2 + 1e-6)),
-            shape=T,
-        )
-        h = pm.Deterministic("h", mu + sigma * z)
-        eta = _stationary_first_innovation(z, phi)
-        vol = pt.exp(h / 2)
-        mu_r = rho * vol * eta
-        sigma_r = pt.sqrt(pt.clip(1 - rho**2, 1e-9, 1.0)) * vol
-        pm.Normal("obs", mu=mu_r, sigma=sigma_r, observed=returns)
+        _mu, _phi, _sigma, h, eta = _common_parameters(T)
+        rho = pm.Uniform("rho", lower=-1.0, upper=1.0)
+        vol = pt.exp(h[:-1] / 2.0)
+        obs_mu = rho * vol * eta
+        obs_sd = pt.sqrt(pt.clip(1.0 - rho**2, 1e-9, 1.0)) * vol
+        pm.Normal("obs", mu=obs_mu, sigma=obs_sd, observed=returns)
     return model
 
 
 def build_sv_t_leverage(returns: np.ndarray, T: int) -> pm.Model:
+    """Heavy-tailed leverage SV with unit-variance conditional t residuals."""
     with pm.Model() as model:
-        mu = pm.Normal("mu", mu=-10, sigma=3)
-        phi_raw = pm.Beta("phi_raw", alpha=20, beta=1.5)
-        phi = pm.Deterministic("phi", 2 * phi_raw - 1)
-        sigma = pm.HalfCauchy("sigma_eta", beta=0.5)
+        _mu, _phi, _sigma, h, eta = _common_parameters(T)
         nu = _nu_prior()
-        rho = pm.Uniform("rho", lower=-1, upper=1)
-        z = pm.AR(
-            "z", rho=phi, sigma=1.0,
-            init_dist=pm.Normal.dist(0, 1 / pt.sqrt(1 - phi**2 + 1e-6)),
-            shape=T,
+        rho = pm.Uniform("rho", lower=-1.0, upper=1.0)
+        vol = pt.exp(h[:-1] / 2.0)
+        obs_mu = rho * vol * eta
+        obs_scale = (
+            pt.sqrt(pt.clip(1.0 - rho**2, 1e-9, 1.0))
+            * vol
+            * _pt_unit_variance_t_scale(nu)
         )
-        h = pm.Deterministic("h", mu + sigma * z)
-        eta = _stationary_first_innovation(z, phi)
-        vol = pt.exp(h / 2)
-        mu_r = rho * vol * eta
-        sigma_r = (
-            pt.sqrt(pt.clip(1 - rho**2, 1e-9, 1.0))
-            * vol * _pt_unit_variance_t_scale(nu)
-        )
-        pm.StudentT("obs", nu=nu, mu=mu_r, sigma=sigma_r, observed=returns)
+        pm.StudentT("obs", nu=nu, mu=obs_mu, sigma=obs_scale, observed=returns)
     return model
 
 
@@ -143,6 +152,68 @@ MODEL_BUILDERS = {
     "SV-Leverage": build_sv_leverage,
     "SV-t-Leverage": build_sv_t_leverage,
 }
+
+
+def _structural_diagnostics(trace, chains: int) -> dict:
+    var_names = [v for v in STRUCTURAL_DIAGNOSTIC_VARS if v in trace.posterior]
+    if not var_names:
+        return {
+            "max_rhat": np.nan,
+            "min_ess": np.nan,
+            "n_divergences": np.nan,
+            "rhat_by_var": {},
+            "ess_by_var": {},
+            "converged": False,
+        }
+
+    n_chains = int(trace.posterior.sizes.get("chain", chains))
+    rhat_by_var = {}
+    if n_chains > 1:
+        rhat = az.rhat(trace, var_names=var_names)
+        for var in rhat.data_vars:
+            values = np.asarray(rhat[var].values, dtype=float)
+            if np.isfinite(values).any():
+                rhat_by_var[var] = float(np.nanmax(values))
+        max_rhat = max(rhat_by_var.values()) if rhat_by_var else np.nan
+    else:
+        max_rhat = np.nan
+
+    ess = az.ess(trace, var_names=var_names, method="bulk")
+    ess_by_var = {}
+    for var in ess.data_vars:
+        values = np.asarray(ess[var].values, dtype=float)
+        if np.isfinite(values).any():
+            ess_by_var[var] = float(np.nanmin(values))
+    min_ess = min(ess_by_var.values()) if ess_by_var else np.nan
+
+    if "diverging" in trace.sample_stats:
+        n_divergences = int(trace.sample_stats["diverging"].sum().values)
+    else:
+        n_divergences = 0
+
+    if n_chains > 1:
+        converged = (
+            np.isfinite(max_rhat)
+            and max_rhat < RHAT_THRESHOLD
+            and np.isfinite(min_ess)
+            and min_ess > MIN_STRUCTURAL_ESS
+            and n_divergences == 0
+        )
+    else:
+        converged = (
+            np.isfinite(min_ess)
+            and min_ess > FAST_MIN_ESS
+            and n_divergences == 0
+        )
+
+    return {
+        "max_rhat": max_rhat,
+        "min_ess": min_ess,
+        "n_divergences": n_divergences,
+        "rhat_by_var": rhat_by_var,
+        "ess_by_var": ess_by_var,
+        "converged": bool(converged),
+    }
 
 
 def fit_sv(
@@ -155,7 +226,7 @@ def fit_sv(
     random_seed: int = 42,
     fast_mode: bool = False,
 ) -> dict:
-    """Fit one SV specification and return diagnostics with the trace."""
+    """Fit one SV specification and return structural convergence diagnostics."""
     if variant not in MODEL_BUILDERS:
         raise ValueError(f"Unknown variant '{variant}'. Choose from {list(MODEL_BUILDERS)}")
 
@@ -163,6 +234,9 @@ def fit_sv(
         chains, draws, tune = 1, 500, 500
 
     returns = np.asarray(returns, dtype=float)
+    if returns.ndim != 1 or len(returns) < 2 or not np.isfinite(returns).all():
+        raise ValueError("returns must be a finite one-dimensional array")
+
     mean_return = float(np.mean(returns))
     demeaned = returns - mean_return
     model = MODEL_BUILDERS[variant](demeaned, len(demeaned))
@@ -180,49 +254,10 @@ def fit_sv(
                 nuts_sampler_kwargs={"max_treedepth": 12},
             )
 
-        n_chains = int(trace.posterior.sizes.get("chain", chains))
-        scalar_vars = [v for v in trace.posterior.data_vars if v not in ("h", "z")]
-
-        if n_chains > 1:
-            rhat = az.rhat(trace, var_names=scalar_vars)
-            rhat_values = [
-                float(np.nanmax(rhat[v].values))
-                for v in rhat.data_vars
-                if np.isfinite(rhat[v].values).any()
-            ]
-            max_rhat = max(rhat_values) if rhat_values else np.nan
-        else:
-            max_rhat = np.nan
-
-        ess = az.ess(trace, var_names=scalar_vars)
-        ess_values = [
-            float(np.nanmin(ess[v].values))
-            for v in ess.data_vars
-            if np.isfinite(ess[v].values).any()
-        ]
-        min_ess = min(ess_values) if ess_values else np.nan
-
-        if "diverging" in trace.sample_stats:
-            n_divergences = int(trace.sample_stats["diverging"].sum().values)
-        else:
-            n_divergences = 0
-
-        if n_chains > 1:
-            converged = (
-                np.isfinite(max_rhat)
-                and max_rhat < RHAT_THRESHOLD
-                and min_ess > 400
-                and n_divergences == 0
-            )
-        else:
-            converged = min_ess > FAST_MIN_ESS and n_divergences == 0
-
+        diagnostics = _structural_diagnostics(trace, chains)
         return {
             "trace": trace,
-            "converged": bool(converged),
-            "max_rhat": max_rhat,
-            "min_ess": min_ess,
-            "n_divergences": n_divergences,
+            **diagnostics,
             "variant": variant,
             "T": len(returns),
             "mean_return": mean_return,
@@ -238,6 +273,8 @@ def fit_sv(
             "max_rhat": np.nan,
             "min_ess": np.nan,
             "n_divergences": np.nan,
+            "rhat_by_var": {},
+            "ess_by_var": {},
             "variant": variant,
             "T": len(returns),
             "mean_return": mean_return,
@@ -256,12 +293,7 @@ def fit_sv_adaptive(
     random_seed: int = 42,
     attempts=None,
 ) -> dict:
-    """Fit a rolling SV refit using a strict, empirically validated escalation.
-
-    The default policy was validated on the real gold pilot: 4x1000 cleared the
-    strict R-hat/ESS gate for SV-t, while SV-t-Leverage required escalation to
-    4x2000. A failed first attempt is never used for forecasting.
-    """
+    """Apply the strict rolling MCMC escalation; never accept a weak trace."""
     if attempts is None:
         attempts = DEFAULT_ROLLING_MCMC_ATTEMPTS
 
@@ -287,12 +319,16 @@ def fit_sv_adaptive(
             "max_rhat": fit.get("max_rhat", np.nan),
             "min_ess": fit.get("min_ess", np.nan),
             "n_divergences": fit.get("n_divergences", np.nan),
+            "rhat_by_var": fit.get("rhat_by_var", {}),
+            "ess_by_var": fit.get("ess_by_var", {}),
             "error": fit.get("error"),
         })
         final_fit = fit
         if fit.get("converged", False):
             break
 
+    if final_fit is None:
+        raise ValueError("at least one MCMC attempt is required")
     final_fit = dict(final_fit)
     final_fit["mcmc_attempts"] = records
     final_fit["accepted_attempt"] = next(
@@ -302,7 +338,7 @@ def fit_sv_adaptive(
 
 
 def initialize_filter_state(fit_result: dict) -> dict:
-    """Create particle state from posterior draws at the latest fitted date."""
+    """Create particles whose h value is the next forecast-date state."""
     trace = fit_result.get("trace")
     if trace is None:
         raise ValueError("Cannot initialize filter state without a posterior trace")
@@ -313,6 +349,7 @@ def initialize_filter_state(fit_result: dict) -> dict:
         "mu": trace.posterior["mu"].values.reshape(-1).astype(float),
         "phi": trace.posterior["phi"].values.reshape(-1).astype(float),
         "sigma_eta": trace.posterior["sigma_eta"].values.reshape(-1).astype(float),
+        # h has T+1 states for T observed returns; h[-1] is forecast-date h_T.
         "h": trace.posterior["h"].values[:, :, -1].reshape(-1).astype(float),
     }
     if "nu" in trace.posterior:
@@ -323,16 +360,16 @@ def initialize_filter_state(fit_result: dict) -> dict:
 
 
 def _transition_filter_state(state: dict, rng: np.random.Generator) -> dict:
-    """Propagate latent log variance one day forward for every particle."""
+    """Draw eta_t and propose h_{t+1}, retaining h_t for today's forecast."""
     eta = rng.normal(size=len(state["h"]))
     h_next = (
         state["mu"]
         + state["phi"] * (state["h"] - state["mu"])
         + state["sigma_eta"] * eta
     )
-    transition = {k: v for k, v in state.items() if k != "h"}
-    transition["h"] = h_next
+    transition = {k: v for k, v in state.items()}
     transition["eta"] = eta
+    transition["h_next"] = h_next
     return transition
 
 
@@ -341,12 +378,12 @@ def _predictive_returns(
     n_predictive: int,
     rng: np.random.Generator,
 ) -> np.ndarray:
-    """Draw from the one-day posterior predictive distribution."""
+    """Draw r_t from h_t jointly with the proposed eta_t when leverage is used."""
     n_particles = len(transition["h"])
     idx = rng.integers(0, n_particles, size=int(n_predictive))
     h = transition["h"][idx]
     eta = transition["eta"][idx]
-    vol = np.exp(h / 2)
+    vol = np.exp(h / 2.0)
     variant = transition["variant"]
 
     if variant in ("SV-t", "SV-t-Leverage"):
@@ -357,7 +394,7 @@ def _predictive_returns(
 
     if variant in ("SV-Leverage", "SV-t-Leverage"):
         rho = transition["rho"][idx]
-        eps = rho * eta + np.sqrt(np.clip(1 - rho**2, 1e-12, 1.0)) * xi
+        eps = rho * eta + np.sqrt(np.clip(1.0 - rho**2, 1e-12, 1.0)) * xi
     else:
         eps = xi
 
@@ -365,17 +402,17 @@ def _predictive_returns(
 
 
 def _observation_loglik(transition: dict, actual_return: float) -> np.ndarray:
-    """Observation likelihood used to filter the latent state after each day."""
+    """Likelihood of r_t given h_t and proposed eta_t for particle weighting."""
     x = float(actual_return) - transition["mean_return"]
     h = transition["h"]
     eta = transition["eta"]
-    vol = np.exp(h / 2)
+    vol = np.exp(h / 2.0)
     variant = transition["variant"]
 
     if variant in ("SV-Leverage", "SV-t-Leverage"):
         rho = transition["rho"]
         loc = rho * vol * eta
-        base_scale = np.sqrt(np.clip(1 - rho**2, 1e-12, 1.0)) * vol
+        base_scale = np.sqrt(np.clip(1.0 - rho**2, 1e-12, 1.0)) * vol
     else:
         loc = np.zeros_like(vol)
         base_scale = vol
@@ -393,17 +430,24 @@ def update_filter_state(
     actual_return: float,
     rng: np.random.Generator,
 ) -> tuple[dict, float]:
-    """Condition the propagated particles on the newly observed return."""
+    """Condition on r_t, resample, and advance particles from h_t to h_{t+1}."""
+    if "h_next" not in transition:
+        raise ValueError("transition is missing h_next; call _transition_filter_state first")
+
     logw = _observation_loglik(transition, actual_return)
     finite = np.isfinite(logw)
     if not finite.any():
-        weights = np.full(len(logw), 1 / len(logw))
+        weights = np.full(len(logw), 1.0 / len(logw))
     else:
         floor = np.nanmax(logw[finite]) - 1_000.0
         logw = np.where(finite, logw, floor)
         logw -= np.max(logw)
         weights = np.exp(logw)
-        weights /= weights.sum()
+        total = weights.sum()
+        if not np.isfinite(total) or total <= 0.0:
+            weights = np.full(len(logw), 1.0 / len(logw))
+        else:
+            weights /= total
 
     filter_ess = float(1.0 / np.sum(weights**2))
     idx = rng.choice(len(weights), size=len(weights), replace=True, p=weights)
@@ -415,7 +459,7 @@ def update_filter_state(
     for key in ("mu", "phi", "sigma_eta", "nu", "rho"):
         if key in transition:
             new_state[key] = transition[key][idx]
-    new_state["h"] = transition["h"][idx]
+    new_state["h"] = transition["h_next"][idx]
     return new_state, filter_ess
 
 
@@ -434,7 +478,7 @@ def forecast_sv_var_es(
     n_predictive: int = 20_000,
     random_seed: int = 42,
 ) -> tuple:
-    """Compatibility helper for a single one-step forecast after a fresh fit."""
+    """One-step forecast after a fresh fit using its h_T forecast-date state."""
     if fit_result.get("trace") is None:
         return np.nan, np.nan
     state = initialize_filter_state(fit_result)
@@ -486,7 +530,7 @@ def rolling_sv_var_es(
     random_seed: int = 42,
     mcmc_attempts=None,
 ) -> pd.DataFrame:
-    """Adaptive walk-forward VaR/ES with strict MCMC refits and daily filtering."""
+    """Adaptive walk-forward VaR/ES with refits and observation-driven filtering."""
     if alphas is None:
         alphas = [0.01, 0.05]
     if variant not in MODEL_BUILDERS:
@@ -566,6 +610,9 @@ def rolling_sv_var_es(
                 row[f"var_{alpha}"] = np.nan
                 row[f"es_{alpha}"] = np.nan
         else:
+            # This RNG drives the joint draw of eta_t and r_t.  Forecast first;
+            # after r_t is observed, the same eta_t proposals are reweighted to
+            # obtain h_{t+1}.
             step_rng = np.random.default_rng(random_seed * 1_000_003 + i)
             transition = _transition_filter_state(filter_state, step_rng)
             r_pred = _predictive_returns(transition, n_predictive, step_rng)
@@ -574,7 +621,6 @@ def rolling_sv_var_es(
                 row[f"var_{alpha}"] = var
                 row[f"es_{alpha}"] = es
 
-            # Forecast first, then condition on today's realised return.
             filter_state, filter_ess = update_filter_state(
                 transition, actual_return, step_rng
             )
