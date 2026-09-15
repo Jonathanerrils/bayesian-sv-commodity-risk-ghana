@@ -1,31 +1,47 @@
 name: sv-v3-convergence-diagnostic
 
 on:
-  # Production-scale MCMC diagnostics are intentionally manual. Pull-request
-  # path filters evaluate the full PR diff on synchronize events and otherwise
-  # re-run these expensive fits after unrelated benchmark/backtest commits.
+  # This synchronize trigger is temporary for the validation gate.  Once this
+  # expanded matrix has completed, return the workflow to manual-only so later
+  # paper/benchmark commits do not re-run production-scale MCMC diagnostics.
+  pull_request:
+    types: [synchronize]
+    paths:
+      - '.github/workflows/sv-v3-diagnostic.yml'
   workflow_dispatch:
 
 jobs:
   diagnose:
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 90
     strategy:
       fail-fast: false
-      max-parallel: 4
+      max-parallel: 3
       matrix:
         include:
-          - commodity: cocoa
-            variant: SV-Gaussian
-            block: 0
+          # Previously failed under the old sampler; block 0 now passes v3.
           - commodity: cocoa
             variant: SV-Gaussian
             block: 24
+          # Heavy-tail/leverage representative on cocoa.
           - commodity: cocoa
             variant: SV-t-Leverage
             block: 0
+          # Heavy-tail representative on gold.
           - commodity: gold
             variant: SV-t
+            block: 0
+          # Pure leverage representative so every SV family is explicitly tested.
+          - commodity: gold
+            variant: SV-Leverage
+            block: 0
+          # Oil is the empirically hardest commodity; test both a simple and the
+          # richest specification before freezing inference.
+          - commodity: oil
+            variant: SV-Gaussian
+            block: 0
+          - commodity: oil
+            variant: SV-t-Leverage
             block: 0
     steps:
       - uses: actions/checkout@v4
