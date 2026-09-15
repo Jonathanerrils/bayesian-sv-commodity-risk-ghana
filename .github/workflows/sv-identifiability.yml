@@ -1,12 +1,6 @@
 name: sv-identifiability
 
 on:
-  pull_request:
-    types: [synchronize]
-    paths:
-      - 'scripts/diagnose_sv_identifiability.py'
-      - 'scripts/diagnose_sv_bivariate_t_candidate.py'
-      - '.github/workflows/sv-identifiability.yml'
   workflow_dispatch:
 
 permissions:

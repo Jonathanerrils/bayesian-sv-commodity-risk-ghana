@@ -1,10 +1,6 @@
 name: sv-bivariate-t-candidate
 
 on:
-  pull_request:
-    paths:
-      - 'scripts/diagnose_sv_bivariate_t_candidate.py'
-      - '.github/workflows/sv-bivariate-t-candidate.yml'
   workflow_dispatch:
 
 jobs:
