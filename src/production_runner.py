@@ -1,30 +1,8 @@
-"""
-production_runner.py
+"""Production runner for scientifically audited rolling commodity-risk backtests."""
 
-Full rolling-window production run across all models and all commodities.
-Implements Deliverable 2 exactly as specified, with:
-
-  - Checkpointing: saves after every MCMC refit -- a crash loses at most
-    one refit window (21 days), not the entire run
-  - Progress logging: timestamped log file so you can monitor without
-    watching the terminal
-  - Incremental saves: forecast DataFrames written to CSV as they accumulate
-  - Resume capability: detects existing checkpoint and skips already-done steps
-
-Runtime estimates (based on actual sandbox timing of 40.6s/refit):
-  Modern laptop (~4x faster): ~7-8 hours total for all models + commodities
-  Budget laptop (~2x faster): ~15 hours total
-  Run overnight. Do not interrupt mid-commodity if avoidable.
-
-Usage:
-  python production_runner.py                  # full run, all models
-  python production_runner.py --commodity gold  # one commodity only
-  python production_runner.py --sv-only         # SV variants only (skip GARCH/OU)
-  python production_runner.py --benchmark-only  # GARCH/EGARCH/HS/OU only (fast)
-"""
+from __future__ import annotations
 
 import argparse
-import json
 import logging
 import sys
 import time
@@ -36,273 +14,315 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from data_utils import load_all_returns, load_all_prices
-from garch_model import (rolling_var_es,
-                                       historical_simulation_var_es)
-from ou_model import rolling_ou_var_es
-from sv_model import rolling_sv_var_es
-from backtests import run_all_backtests
+from backtests import apply_bonferroni_reporting, run_all_backtests
+from data_utils import load_all_prices, load_all_returns
+from garch_model import historical_simulation_var_es, rolling_var_es
+from ou_model import OU_MODEL_VERSION, rolling_ou_var_es
+from sv_model import DEFAULT_ROLLING_MCMC_ATTEMPTS, MODEL_VERSION, rolling_sv_var_es
 
-# -----------------------------------------------------------------------
-# PATHS
-# -----------------------------------------------------------------------
-PROJECT_ROOT   = Path(__file__).resolve().parent.parent
-RESULTS_DIR    = PROJECT_ROOT / "outputs"
-BACKTESTS_DIR  = RESULTS_DIR / "model_results"
-TABLES_DIR     = RESULTS_DIR / "tables"
-CHECKPOINT_DIR = PROJECT_ROOT / "checkpoints"
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+RESULTS_DIR = PROJECT_ROOT / "outputs" / "v2"
+TABLES_DIR = RESULTS_DIR / "tables"
+CHECKPOINT_ROOT = PROJECT_ROOT / "checkpoints" / "v2"
 
-for d in [RESULTS_DIR, BACKTESTS_DIR, TABLES_DIR, CHECKPOINT_DIR]:
-    d.mkdir(exist_ok=True)
+PIPELINE_VERSION = "risk-pipeline-v4-sv-timing-ou-pairs-availability-dual-multiplicity"
+ALPHAS = [0.01, 0.05]
+COMMODITIES = ["cocoa", "gold", "oil"]
+SV_VARIANTS = ["SV-Gaussian", "SV-t", "SV-Leverage", "SV-t-Leverage"]
+GARCH_BENCHMARK_SPECS = {
+    "GARCH": ("GARCH", "normal"),
+    "GARCH-t": ("GARCH", "t"),
+    "EGARCH": ("EGARCH", "normal"),
+    "EGARCH-t": ("EGARCH", "t"),
+}
+BENCHMARK_MODELS = [*GARCH_BENCHMARK_SPECS, "OU", "HistSim"]
+ALL_MODELS = [*BENCHMARK_MODELS, *SV_VARIANTS]
 
-# -----------------------------------------------------------------------
-# CONFIGURATION (Deliverable 2)
-# -----------------------------------------------------------------------
-WINDOW        = 1000   # primary rolling window
-REFIT_EVERY   = 42     # MCMC refit frequency for SV (trading days)
-ALPHAS        = [0.01, 0.05]
-COMMODITIES   = ["cocoa", "gold", "oil"]
+# Two multiplicity families are reported by design, before seeing repaired results.
+# 1) Per-test family: each named test across model x commodity x confidence cells.
+PER_TEST_BONFERRONI_FAMILY_SIZE = len(ALL_MODELS) * len(COMMODITIES) * len(ALPHAS)
+# 2) Global-primary family: all three primary tests across all comparison cells.
+GLOBAL_PRIMARY_BONFERRONI_FAMILY_SIZE = PER_TEST_BONFERRONI_FAMILY_SIZE * 3
+# Backwards-compatible alias; always means the manuscript-style per-test family.
+BONFERRONI_FAMILY_SIZE = PER_TEST_BONFERRONI_FAMILY_SIZE
 
-SV_VARIANTS   = ["SV-Gaussian", "SV-t", "SV-Leverage", "SV-t-Leverage"]
-BENCHMARK_MODELS = ["GARCH", "EGARCH", "OU", "HistSim"]
 
-# -----------------------------------------------------------------------
-# LOGGING
-# -----------------------------------------------------------------------
-def setup_logging(log_path: Path) -> logging.Logger:
-    logger = logging.getLogger("production_runner")
+def setup_logging(path: Path) -> logging.Logger:
+    logger = logging.getLogger(f"production_runner.{path.stem}")
     logger.setLevel(logging.INFO)
-    fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s",
-                            datefmt="%Y-%m-%d %H:%M:%S")
-    # File handler
-    fh = logging.FileHandler(log_path)
-    fh.setFormatter(fmt)
-    logger.addHandler(fh)
-    # Console handler
-    ch = logging.StreamHandler()
-    ch.setFormatter(fmt)
-    logger.addHandler(ch)
+    logger.handlers.clear()
+    fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+    for handler in (logging.FileHandler(path), logging.StreamHandler()):
+        handler.setFormatter(fmt)
+        logger.addHandler(handler)
     return logger
 
 
-# -----------------------------------------------------------------------
-# CHECKPOINT HELPERS
-# -----------------------------------------------------------------------
-def checkpoint_path(commodity: str, model: str) -> Path:
-    return CHECKPOINT_DIR / f"{commodity}_{model.replace(' ', '_')}.csv"
+def mcmc_policy_label(attempts=None) -> str:
+    attempts = DEFAULT_ROLLING_MCMC_ATTEMPTS if attempts is None else attempts
+    return "-then-".join(
+        f"{int(a['chains'])}c{int(a['tune'])}t{int(a['draws'])}d" for a in attempts
+    )
 
 
-def checkpoint_exists(commodity: str, model: str) -> bool:
-    return checkpoint_path(commodity, model).exists()
+def run_key(window: int, refit_every: int, predictive_draws: int) -> str:
+    return (
+        f"{PIPELINE_VERSION}_{MODEL_VERSION}_{OU_MODEL_VERSION}_"
+        f"{mcmc_policy_label()}_w{window}_r{refit_every}_p{predictive_draws}"
+        .replace("/", "-")
+        .replace(" ", "-")
+    )
 
 
-def load_checkpoint(commodity: str, model: str) -> pd.DataFrame:
-    return pd.read_csv(checkpoint_path(commodity, model),
-                       parse_dates=["date"], index_col="date")
+def checkpoint_path(commodity, model, window, refit_every, predictive_draws) -> Path:
+    root = CHECKPOINT_ROOT / run_key(window, refit_every, predictive_draws)
+    root.mkdir(parents=True, exist_ok=True)
+    return root / f"{commodity}_{model.replace(' ', '_')}.csv"
 
 
-def save_checkpoint(df: pd.DataFrame, commodity: str, model: str):
-    df.to_csv(checkpoint_path(commodity, model))
+def load_checkpoint(path: Path) -> pd.DataFrame:
+    return pd.read_csv(path, parse_dates=["date"], index_col="date")
 
 
-# -----------------------------------------------------------------------
-# BENCHMARK RUNNER (GARCH, EGARCH, OU, HistSim)
-# -----------------------------------------------------------------------
-def run_benchmark(commodity: str, model: str,
-                  returns: pd.Series, prices: pd.Series,
-                  logger: logging.Logger) -> pd.DataFrame:
+def run_benchmark(commodity, model, returns, prices, window, refit_every, predictive_draws, logger):
+    path = checkpoint_path(commodity, model, window, refit_every, predictive_draws)
+    if path.exists():
+        existing = load_checkpoint(path)
+        if len(existing) == len(returns) - window:
+            logger.info("[SKIP] %s/%s: validated checkpoint", commodity, model)
+            return existing
+        logger.warning("[STALE] %s has wrong row count; recomputing", path)
 
-    if checkpoint_exists(commodity, model):
-        logger.info(f"  [SKIP] {commodity}/{model}: checkpoint found, loading")
-        return load_checkpoint(commodity, model)
-
-    logger.info(f"  [START] {commodity}/{model}")
     t0 = time.time()
-
-    if model == "GARCH":
-        df = rolling_var_es(returns, "GARCH", window=WINDOW, alphas=ALPHAS)
-    elif model == "EGARCH":
-        df = rolling_var_es(returns, "EGARCH", window=WINDOW, alphas=ALPHAS)
+    if model in GARCH_BENCHMARK_SPECS:
+        model_type, distribution = GARCH_BENCHMARK_SPECS[model]
+        df = rolling_var_es(
+            returns, model_type=model_type, distribution=distribution,
+            window=window, alphas=ALPHAS,
+        )
     elif model == "HistSim":
-        df = historical_simulation_var_es(returns, window=WINDOW, alphas=ALPHAS)
+        df = historical_simulation_var_es(returns, window=window, alphas=ALPHAS)
     elif model == "OU":
-        df = rolling_ou_var_es(prices, returns, window=WINDOW,
-                               alphas=ALPHAS)
+        df = rolling_ou_var_es(prices, returns, window=window, alphas=ALPHAS)
     else:
-        raise ValueError(f"Unknown benchmark model: {model}")
-
-    elapsed = time.time() - t0
-    logger.info(f"  [DONE] {commodity}/{model}: "
-                f"{len(df)} forecasts in {elapsed/60:.1f} min")
-    save_checkpoint(df, commodity, model)
+        raise ValueError(f"Unknown benchmark: {model}")
+    df.to_csv(path)
+    logger.info("[DONE] %s/%s: %d forecasts in %.1f min", commodity, model, len(df), (time.time() - t0) / 60)
     return df
 
 
-# -----------------------------------------------------------------------
-# SV RUNNER
-# -----------------------------------------------------------------------
-def run_sv(commodity: str, variant: str,
-           returns: pd.Series,
-           logger: logging.Logger) -> pd.DataFrame:
+def run_sv(commodity, variant, returns, window, refit_every, predictive_draws, logger):
+    path = checkpoint_path(commodity, variant, window, refit_every, predictive_draws)
+    expected = len(returns) - window
+    if path.exists():
+        existing = load_checkpoint(path)
+        if len(existing) == expected:
+            logger.info("[SKIP] %s/%s: validated checkpoint", commodity, variant)
+            return existing
 
-    ckpt_path = checkpoint_path(commodity, variant)
-    expected_steps = len(returns) - WINDOW
-
-    if ckpt_path.exists():
-        try:
-            existing = pd.read_csv(ckpt_path, parse_dates=["date"])
-            if len(existing) >= expected_steps:
-                logger.info(f"  [SKIP] {commodity}/{variant}: complete "
-                           f"checkpoint found ({len(existing)} steps), loading")
-                return load_checkpoint(commodity, variant)
-            else:
-                logger.info(f"  [RESUME] {commodity}/{variant}: partial "
-                           f"checkpoint found ({len(existing)}/{expected_steps} "
-                           f"steps) -- resuming rather than restarting")
-        except Exception:
-            logger.warning(f"  [WARN] {commodity}/{variant}: existing "
-                          f"checkpoint unreadable, starting fresh")
-
-    logger.info(f"  [START] {commodity}/{variant}")
     t0 = time.time()
-
-    df = rolling_sv_var_es(returns, variant=variant, window=WINDOW,
-                           refit_every=REFIT_EVERY, alphas=ALPHAS,
-                           checkpoint_path=ckpt_path, checkpoint_every=50)
-
-    elapsed = time.time() - t0
-    logger.info(f"  [DONE] {commodity}/{variant}: "
-                f"{len(df)} forecasts in {elapsed/60:.1f} min")
+    df = rolling_sv_var_es(
+        returns,
+        variant=variant,
+        window=window,
+        refit_every=refit_every,
+        alphas=ALPHAS,
+        checkpoint_path=path,
+        checkpoint_every=50,
+        n_predictive=predictive_draws,
+        mcmc_attempts=DEFAULT_ROLLING_MCMC_ATTEMPTS,
+    )
+    logger.info("[DONE] %s/%s: %d forecasts in %.1f min", commodity, variant, len(df), (time.time() - t0) / 60)
     return df
 
 
-# -----------------------------------------------------------------------
-# BACKTEST + RESULTS TABLE
-# -----------------------------------------------------------------------
-def compile_results(all_forecasts: dict, logger: logging.Logger) -> pd.DataFrame:
-    """
-    Run all backtest statistics and compile the full results table.
-    all_forecasts: dict of {(commodity, model): forecast_df}
-    """
-    logger.info("Compiling backtest results...")
-    all_rows = []
+def _valid_forecast_mask(fc: pd.DataFrame, alphas=None) -> pd.Series:
+    alphas = ALPHAS if alphas is None else alphas
+    mask = pd.Series(True, index=fc.index, dtype=bool)
+    required = ["actual_return"]
+    for alpha in alphas:
+        required.extend([f"var_{alpha}", f"es_{alpha}"])
+    for col in required:
+        if col not in fc:
+            return pd.Series(False, index=fc.index, dtype=bool)
+        mask &= np.isfinite(pd.to_numeric(fc[col], errors="coerce"))
+    if "estimation_failed" in fc:
+        mask &= ~fc["estimation_failed"].fillna(True).astype(bool)
+    return mask
 
-    for (commodity, model), fc_df in all_forecasts.items():
-        n_nan = fc_df[[c for c in fc_df.columns if c.startswith("var_")]]\
-                .isna().any(axis=1).sum()
-        if n_nan > 0:
-            logger.warning(f"  {commodity}/{model}: {n_nan} NaN forecast rows")
 
-        bt = run_all_backtests(fc_df, alphas=ALPHAS, label=f"{commodity}/{model}")
+def common_valid_dates(forecasts: dict, commodity: str) -> pd.DatetimeIndex:
+    frames = [fc for (comm, _model), fc in forecasts.items() if comm == commodity]
+    if not frames:
+        return pd.DatetimeIndex([])
+    common = None
+    for fc in frames:
+        idx = pd.DatetimeIndex(fc.index[_valid_forecast_mask(fc)])
+        common = idx if common is None else common.intersection(idx)
+    return pd.DatetimeIndex(common).sort_values()
+
+
+def _backtest_rows(forecasts, window, refit_every, predictive_draws, common_dates):
+    rows = []
+    date_cache = {
+        commodity: common_valid_dates(forecasts, commodity)
+        for commodity in sorted({c for c, _m in forecasts})
+    }
+    for (commodity, model), fc in forecasts.items():
+        used = fc.loc[date_cache[commodity]] if common_dates else fc
+        bt = run_all_backtests(used, ALPHAS, label=f"{commodity}/{model}")
         bt["commodity"] = commodity
-        bt["model"]     = model
-        all_rows.append(bt)
-
-    results = pd.concat(all_rows, ignore_index=True)
-
-    # Save full results table
-    out_path = TABLES_DIR / "full_backtest_results.csv"
-    results.to_csv(out_path, index=False)
-    logger.info(f"Full results saved to {out_path}")
-
-    # Summary table: pass/fail counts per model
-    summary = results.groupby(["commodity", "model"])\
-                     [["kupiec_passed", "cc_passed", "ind_passed", "as_passed"]]\
-                     .sum().reset_index()
-    summary["total_tests"] = results.groupby(["commodity", "model"])["alpha"]\
-                                    .count().values * 4
-    summary_path = TABLES_DIR / "summary_pass_counts.csv"
-    summary.to_csv(summary_path, index=False)
-    logger.info(f"Summary pass counts saved to {summary_path}")
-
-    return results
+        bt["model"] = model
+        bt["sample"] = "common_dates" if common_dates else "native"
+        bt["window"] = window
+        bt["refit_every"] = refit_every if model in SV_VARIANTS else 1
+        bt["predictive_draws"] = predictive_draws if model in SV_VARIANTS else 0
+        bt["pipeline_version"] = PIPELINE_VERSION
+        bt["model_version"] = MODEL_VERSION if model in SV_VARIANTS else "n/a"
+        bt["ou_model_version"] = OU_MODEL_VERSION if model == "OU" else "n/a"
+        bt["mcmc_policy"] = mcmc_policy_label() if model in SV_VARIANTS else "n/a"
+        rows.append(bt)
+    return pd.concat(rows, ignore_index=True)
 
 
-# -----------------------------------------------------------------------
-# MAIN
-# -----------------------------------------------------------------------
+def _add_dual_bonferroni(results: pd.DataFrame) -> pd.DataFrame:
+    """Report both pre-declared multiplicity families without choosing post hoc."""
+    per_test = apply_bonferroni_reporting(results, PER_TEST_BONFERRONI_FAMILY_SIZE)
+    global_primary = apply_bonferroni_reporting(results, GLOBAL_PRIMARY_BONFERRONI_FAMILY_SIZE)
+    out = per_test.copy()
+    corrected_cols = [
+        c for c in global_primary.columns
+        if c.endswith("_bonferroni")
+        or c in {"bonferroni_family_size", "bonferroni_alpha", "as_bonferroni_decision", "as_bonferroni_decision_stable"}
+    ]
+    for col in corrected_cols:
+        out[f"{col}_global_primary"] = global_primary[col].values
+    out["multiplicity_per_test_family_size"] = PER_TEST_BONFERRONI_FAMILY_SIZE
+    out["multiplicity_global_primary_family_size"] = GLOBAL_PRIMARY_BONFERRONI_FAMILY_SIZE
+    return out
+
+
+def _summary_table(results: pd.DataFrame, scheme: str = "raw") -> pd.DataFrame:
+    grouped = results.groupby(["commodity", "model"], sort=True)
+    if scheme == "raw":
+        cols = ["kupiec_passed", "cc_passed", "as_passed"]
+    elif scheme == "per_test":
+        cols = ["kupiec_passed_bonferroni", "cc_passed_bonferroni", "as_passed_bonferroni"]
+    elif scheme == "global_primary":
+        cols = [
+            "kupiec_passed_bonferroni_global_primary",
+            "cc_passed_bonferroni_global_primary",
+            "as_passed_bonferroni_global_primary",
+        ]
+    else:
+        raise ValueError(f"Unknown summary scheme: {scheme}")
+    summary = grouped[cols].sum()
+    summary["primary_nonrejections"] = summary.sum(axis=1)
+    summary["primary_tests_total"] = grouped.size() * 3
+    summary["independence_nonrejections"] = grouped["ind_passed"].sum()
+    summary["independence_total"] = grouped.size()
+    summary["n_obs_min"] = grouped["n_obs"].min()
+    summary["n_obs_max"] = grouped["n_obs"].max()
+    summary["scheme"] = scheme
+    return summary.reset_index()
+
+
+def compile_results(forecasts, window, refit_every, predictive_draws, logger) -> pd.DataFrame:
+    out_dir = TABLES_DIR / run_key(window, refit_every, predictive_draws)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    native = _add_dual_bonferroni(
+        _backtest_rows(forecasts, window, refit_every, predictive_draws, common_dates=False)
+    )
+    primary = _add_dual_bonferroni(
+        _backtest_rows(forecasts, window, refit_every, predictive_draws, common_dates=True)
+    )
+
+    primary.to_csv(out_dir / "full_backtest_results.csv", index=False)
+    primary.to_csv(out_dir / "full_backtest_results_common_dates.csv", index=False)
+    native.to_csv(out_dir / "full_backtest_results_native.csv", index=False)
+    _summary_table(primary, "raw").to_csv(out_dir / "summary_nonrejections.csv", index=False)
+    _summary_table(native, "raw").to_csv(out_dir / "summary_nonrejections_native.csv", index=False)
+    _summary_table(primary, "per_test").to_csv(out_dir / "summary_nonrejections_bonferroni_per_test.csv", index=False)
+    _summary_table(native, "per_test").to_csv(out_dir / "summary_nonrejections_native_bonferroni_per_test.csv", index=False)
+    _summary_table(primary, "global_primary").to_csv(out_dir / "summary_nonrejections_bonferroni_global_primary.csv", index=False)
+    _summary_table(native, "global_primary").to_csv(out_dir / "summary_nonrejections_native_bonferroni_global_primary.csv", index=False)
+
+    for commodity in sorted({c for c, _m in forecasts}):
+        n_common = len(common_valid_dates(forecasts, commodity))
+        logger.info(
+            "[COMMON-DATE] %s: %d dates retained across %d models",
+            commodity, n_common, sum(1 for c, _m in forecasts if c == commodity),
+        )
+        if n_common == 0:
+            raise RuntimeError(
+                f"No common valid forecast dates remain for {commodity}; common-date comparison is undefined."
+            )
+
+    logger.info(
+        "Multiplicity families: per-test m=%d (alpha=%.8f); global-primary m=%d (alpha=%.8f)",
+        PER_TEST_BONFERRONI_FAMILY_SIZE,
+        0.05 / PER_TEST_BONFERRONI_FAMILY_SIZE,
+        GLOBAL_PRIMARY_BONFERRONI_FAMILY_SIZE,
+        0.05 / GLOBAL_PRIMARY_BONFERRONI_FAMILY_SIZE,
+    )
+    logger.info("Non-rejection is not evidence of adequacy; availability is reported separately.")
+    logger.info("Backtest tables saved under %s", out_dir)
+    return primary
+
+
 def main():
-    parser = argparse.ArgumentParser(description="Production backtest runner")
-    parser.add_argument("--commodity", choices=COMMODITIES + ["all"],
-                        default="all")
-    parser.add_argument("--sv-only",        action="store_true")
+    parser = argparse.ArgumentParser(description="Commodity-risk production runner")
+    parser.add_argument("--commodity", choices=COMMODITIES + ["all"], default="all")
+    parser.add_argument("--sv-only", action="store_true")
     parser.add_argument("--benchmark-only", action="store_true")
-    parser.add_argument("--window",     type=int, default=WINDOW)
+    parser.add_argument("--window", type=int, default=1000)
+    parser.add_argument("--refit-every", type=int, default=42)
+    parser.add_argument("--predictive-draws", type=int, default=20_000)
     args = parser.parse_args()
 
-    run_sv_models   = not args.benchmark_only
-    run_benchmarks  = not args.sv_only
-    commodities     = COMMODITIES if args.commodity == "all" \
-                      else [args.commodity]
-    window          = args.window
+    if args.sv_only and args.benchmark_only:
+        parser.error("--sv-only and --benchmark-only are mutually exclusive")
+    if args.window < 100:
+        parser.error("--window must be at least 100 observations")
+    if args.refit_every < 1:
+        parser.error("--refit-every must be >= 1")
+    if args.predictive_draws < 2_000:
+        parser.error("--predictive-draws must be >= 2000")
 
-    log_path = PROJECT_ROOT / f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
-    logger   = setup_logging(log_path)
+    commodities = COMMODITIES if args.commodity == "all" else [args.commodity]
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    log_path = RESULTS_DIR / f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+    logger = setup_logging(log_path)
+    logger.info(
+        "Run config: commodities=%s window=%d refit=%d predictive=%d pipeline=%s sv=%s ou=%s",
+        commodities, args.window, args.refit_every, args.predictive_draws,
+        PIPELINE_VERSION, MODEL_VERSION, OU_MODEL_VERSION,
+    )
+    logger.info("Rolling MCMC policy: %s", mcmc_policy_label())
 
-    logger.info("=" * 60)
-    logger.info("PRODUCTION RUN STARTED")
-    logger.info(f"  Commodities:   {commodities}")
-    logger.info(f"  Window:        {window}")
-    logger.info(f"  Benchmarks:    {run_benchmarks}")
-    logger.info(f"  SV models:     {run_sv_models}")
-    logger.info(f"  Refit every:   {REFIT_EVERY} days (SV only)")
-    logger.info(f"  Log file:      {log_path}")
-    logger.info("=" * 60)
-
-    # Load data once
-    logger.info("Loading and cleaning data...")
-    all_returns = load_all_returns(verbose=False)
-    # Load raw prices for OU (needs price levels, not returns).
-    # Uses load_all_prices() from data_utils.py, which correctly handles
-    # the three different raw file formats (yfinance multi-header for
-    # cocoa/gold, headerless for Brent) -- do not re-implement file
-    # reading here, it was a real source of bugs before this fix.
-    raw_prices = load_all_prices()
-
-    all_forecasts = {}
-    run_start = time.time()
-
+    returns_all = load_all_returns(verbose=False)
+    prices_all = load_all_prices()
+    forecasts = {}
     for commodity in commodities:
-        ret    = all_returns[commodity]
-        prices = raw_prices[commodity]
-        # Align prices index with returns index
-        prices = prices.reindex(ret.index).ffill()
-
-        logger.info(f"\n{'='*40}")
-        logger.info(f"COMMODITY: {commodity.upper()}")
-        logger.info(f"  Returns: {len(ret)} obs, "
-                    f"{ret.index.min().date()} to {ret.index.max().date()}")
-        logger.info(f"  Expected out-of-sample steps: {len(ret) - window}")
-
-        # --- Benchmarks ---
-        if run_benchmarks:
+        returns = returns_all[commodity]
+        # Preserve the full price index. OU aligns each retained return to its
+        # exact conditioning/current price pair internally.
+        prices = prices_all[commodity]
+        if not args.sv_only:
             for model in BENCHMARK_MODELS:
-                try:
-                    fc = run_benchmark(commodity, model, ret, prices, logger)
-                    all_forecasts[(commodity, model)] = fc
-                except Exception as e:
-                    logger.error(f"  [FAILED] {commodity}/{model}: {e}")
-
-        # --- SV variants ---
-        if run_sv_models:
+                forecasts[(commodity, model)] = run_benchmark(
+                    commodity, model, returns, prices,
+                    args.window, args.refit_every, args.predictive_draws, logger,
+                )
+        if not args.benchmark_only:
             for variant in SV_VARIANTS:
-                try:
-                    fc = run_sv(commodity, variant, ret, logger)
-                    all_forecasts[(commodity, variant)] = fc
-                except Exception as e:
-                    logger.error(f"  [FAILED] {commodity}/{variant}: {e}")
-
-    # --- Compile results ---
-    if all_forecasts:
-        results = compile_results(all_forecasts, logger)
-        logger.info("\n=== BACKTEST SUMMARY ===")
-        logger.info(results[["commodity", "model", "alpha",
-                              "kupiec_passed", "cc_passed",
-                              "as_passed"]].to_string(index=False))
-
-    total_elapsed = (time.time() - run_start) / 3600
-    logger.info(f"\nTotal runtime: {total_elapsed:.2f} hours")
-    logger.info("PRODUCTION RUN COMPLETE")
+                forecasts[(commodity, variant)] = run_sv(
+                    commodity, variant, returns,
+                    args.window, args.refit_every, args.predictive_draws, logger,
+                )
+    if forecasts:
+        compile_results(forecasts, args.window, args.refit_every, args.predictive_draws, logger)
 
 
 if __name__ == "__main__":

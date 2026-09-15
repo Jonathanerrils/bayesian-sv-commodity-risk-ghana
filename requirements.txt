@@ -1,9 +1,9 @@
 numpy>=1.26,<2.5
-pandas>=2.0
-scipy>=1.11
-arch>=6.0
-statsmodels>=0.14
-pymc>=5.0
-pytensor>=2.18
-arviz>=0.17
-matplotlib>=3.7
+pandas>=2.0,<3.0
+scipy>=1.11,<2.0
+arch>=6.0,<8.0
+statsmodels>=0.14,<0.15
+pymc==5.28.4
+arviz>=0.20,<1.0
+matplotlib>=3.7,<4.0
+pytest>=8,<9

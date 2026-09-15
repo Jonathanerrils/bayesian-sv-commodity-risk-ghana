@@ -1,0 +1,57 @@
+name: sv-v3-convergence-diagnostic
+
+on:
+  workflow_dispatch:
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        include:
+          - commodity: cocoa
+            variant: SV-Gaussian
+            block: 24
+          - commodity: cocoa
+            variant: SV-t-Leverage
+            block: 0
+          - commodity: gold
+            variant: SV-t
+            block: 0
+          - commodity: gold
+            variant: SV-Leverage
+            block: 0
+          - commodity: oil
+            variant: SV-Gaussian
+            block: 0
+          - commodity: oil
+            variant: SV-t-Leverage
+            block: 0
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: python -m pip install --upgrade pip
+      - run: pip install -r requirements.txt
+      - name: Run production-scale refit diagnostic
+        run: >-
+          python scripts/diagnose_sv_refit.py
+          --commodity "${{ matrix.commodity }}"
+          --variant "${{ matrix.variant }}"
+          --block "${{ matrix.block }}"
+          --window 1000
+          --refit-every 42
+          --output-dir diagnostics
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sv-v3-${{ matrix.commodity }}-${{ matrix.variant }}-block-${{ matrix.block }}
+          path: diagnostics/
+          if-no-files-found: warn
+          retention-days: 30

@@ -1,0 +1,265 @@
+name: w1000-primary-production
+
+on:
+  # Once this workflow eventually exists on the default branch, it can also be
+  # run from Actions -> Run workflow.  While PR #1 remains unmerged, adding the
+  # dedicated label below is the safe manual launch mechanism.
+  workflow_dispatch:
+    inputs:
+      window:
+        description: Rolling estimation window
+        required: true
+        default: "1000"
+      refit_every:
+        description: SV structural-parameter refit interval
+        required: true
+        default: "42"
+      predictive_draws:
+        description: Posterior predictive draws per forecast day
+        required: true
+        default: "20000"
+      blocks_per_shard:
+        description: Number of complete 42-day SV refit blocks per job
+        required: true
+        default: "4"
+  pull_request:
+    types: [labeled]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: w1000-primary-production-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: false
+
+env:
+  WINDOW: ${{ inputs.window || '1000' }}
+  REFIT_EVERY: ${{ inputs.refit_every || '42' }}
+  PREDICTIVE_DRAWS: ${{ inputs.predictive_draws || '20000' }}
+  BLOCKS_PER_SHARD: ${{ inputs.blocks_per_shard || '4' }}
+  PYTHONUNBUFFERED: "1"
+
+jobs:
+  prepare:
+    if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'run-w1000-production'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      benchmark: ${{ steps.matrix.outputs.benchmark }}
+      sv_cocoa: ${{ steps.matrix.outputs.sv_cocoa }}
+      sv_gold: ${{ steps.matrix.outputs.sv_gold }}
+      sv_oil: ${{ steps.matrix.outputs.sv_oil }}
+      metadata: ${{ steps.matrix.outputs.metadata }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install --upgrade pip
+      - run: pip install -r requirements.txt
+      - id: matrix
+        name: Build validated shard matrices
+        run: |
+          python scripts/build_production_matrix.py \
+            --window "$WINDOW" \
+            --refit-every "$REFIT_EVERY" \
+            --blocks-per-shard "$BLOCKS_PER_SHARD" \
+            --github-output "$GITHUB_OUTPUT" \
+            --json-output production_plan.json
+      - name: Record plan
+        run: |
+          echo "## W=1000 corrected production plan" >> "$GITHUB_STEP_SUMMARY"
+          echo '```json' >> "$GITHUB_STEP_SUMMARY"
+          cat production_plan.json >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: production-plan
+          path: production_plan.json
+          retention-days: 30
+
+  benchmarks:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      max-parallel: 6
+      matrix:
+        include: ${{ fromJSON(needs.prepare.outputs.benchmark) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install --upgrade pip
+      - run: pip install -r requirements.txt
+      - name: Run benchmark shard
+        run: |
+          python scripts/run_production_shard.py \
+            --kind benchmark \
+            --commodity "${{ matrix.commodity }}" \
+            --model "${{ matrix.model }}" \
+            --window "$WINDOW" \
+            --output-dir production_shards
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: production-benchmark-${{ matrix.commodity }}-${{ matrix.model }}
+          path: production_shards/
+          if-no-files-found: warn
+          retention-days: 30
+
+  sv_cocoa:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        include: ${{ fromJSON(needs.prepare.outputs.sv_cocoa) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install --upgrade pip
+      - run: pip install -r requirements.txt
+      - name: Run cocoa SV shard
+        run: |
+          python scripts/run_production_shard.py \
+            --kind sv \
+            --commodity cocoa \
+            --model "${{ matrix.model }}" \
+            --start-block "${{ matrix.start_block }}" \
+            --n-blocks "${{ matrix.n_blocks }}" \
+            --window "$WINDOW" \
+            --refit-every "$REFIT_EVERY" \
+            --predictive-draws "$PREDICTIVE_DRAWS" \
+            --output-dir production_shards
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: production-sv-cocoa-${{ matrix.model }}-${{ matrix.start_block }}
+          path: production_shards/
+          if-no-files-found: warn
+          retention-days: 30
+
+  sv_gold:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        include: ${{ fromJSON(needs.prepare.outputs.sv_gold) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install --upgrade pip
+      - run: pip install -r requirements.txt
+      - name: Run gold SV shard
+        run: |
+          python scripts/run_production_shard.py \
+            --kind sv \
+            --commodity gold \
+            --model "${{ matrix.model }}" \
+            --start-block "${{ matrix.start_block }}" \
+            --n-blocks "${{ matrix.n_blocks }}" \
+            --window "$WINDOW" \
+            --refit-every "$REFIT_EVERY" \
+            --predictive-draws "$PREDICTIVE_DRAWS" \
+            --output-dir production_shards
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: production-sv-gold-${{ matrix.model }}-${{ matrix.start_block }}
+          path: production_shards/
+          if-no-files-found: warn
+          retention-days: 30
+
+  sv_oil:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        include: ${{ fromJSON(needs.prepare.outputs.sv_oil) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install --upgrade pip
+      - run: pip install -r requirements.txt
+      - name: Run oil SV shard
+        run: |
+          python scripts/run_production_shard.py \
+            --kind sv \
+            --commodity oil \
+            --model "${{ matrix.model }}" \
+            --start-block "${{ matrix.start_block }}" \
+            --n-blocks "${{ matrix.n_blocks }}" \
+            --window "$WINDOW" \
+            --refit-every "$REFIT_EVERY" \
+            --predictive-draws "$PREDICTIVE_DRAWS" \
+            --output-dir production_shards
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: production-sv-oil-${{ matrix.model }}-${{ matrix.start_block }}
+          path: production_shards/
+          if-no-files-found: warn
+          retention-days: 30
+
+  assemble:
+    needs: [prepare, benchmarks, sv_cocoa, sv_gold, sv_oil]
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install --upgrade pip
+      - run: pip install -r requirements.txt
+      - name: Download every successful production shard
+        uses: actions/download-artifact@v4
+        with:
+          pattern: production-*
+          path: downloaded_shards
+          merge-multiple: true
+      - name: Validate coverage and assemble canonical results
+        run: |
+          python scripts/assemble_production_run.py \
+            --input-dir downloaded_shards \
+            --output-dir production_package \
+            --window "$WINDOW" \
+            --refit-every "$REFIT_EVERY" \
+            --predictive-draws "$PREDICTIVE_DRAWS"
+      - name: Publish validation summary
+        run: |
+          echo "## Corrected W=1000 production validation" >> "$GITHUB_STEP_SUMMARY"
+          echo '```json' >> "$GITHUB_STEP_SUMMARY"
+          cat production_package/production_validation_summary.json >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: w1000-primary-production-results
+          path: |
+            production_package/
+            outputs/v2/tables/
+          if-no-files-found: error
+          retention-days: 90

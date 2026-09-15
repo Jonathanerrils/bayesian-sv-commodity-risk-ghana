@@ -1,250 +1,247 @@
+"""Bayesian stochastic-volatility models and rolling VaR/ES forecasts.
+
+The model uses an innovation-noncentred AR(1) state parameterisation and an
+explicit forecast-date state convention.
+
+For a mean-adjusted return x_t, the symmetric state equation is
+
+    x_t = exp(h_t / 2) * epsilon_t
+    h_{t+1} = mu + phi * (h_t - mu) + sigma_eta * eta_t
+
+For leverage variants, epsilon_t and eta_t are correlated through rho. Thus a
+negative return shock can alter the distribution of h_{t+1}; the return at t is
+not correlated with the innovation that created h_t. This is the forward
+leverage timing used throughout this implementation.
+
+A rolling fit over T observed returns contains states h_0,...,h_T. The final
+posterior state h_T is therefore the state for the next forecast date. Daily
+filtering forecasts from h_t first, then conditions on the realised return to
+infer eta_t and propagates to h_{t+1}.
+
+Structural parameters are re-estimated only at the predeclared refit boundaries
+0, refit_every, 2*refit_every, ... . If a scheduled refit fails the strict MCMC
+gate, that entire forecast block is explicitly unavailable; the algorithm does
+not retry on an easier next-day window. This makes model availability an
+observable outcome and keeps canonical and distributed production semantics
+identical.
 """
-models/sv/sv_model.py
 
-Bayesian Latent Stochastic Volatility model -- PRIMARY model of the paper.
-Implements all four variants from Deliverable 1, Section 2:
-  1. SV-Gaussian (base)
-  2. SV-t (Student-t innovations)
-  3. SV-Leverage (correlation between return and vol shocks)
-  4. SV-t-Leverage (combined)
+from __future__ import annotations
 
-Non-centred parameterisation is used throughout (Kastner & Fruhwirth-
-Schnatter 2014), verified to avoid the identification failure we confirmed
-in the centred form for this version of PyMC/pytensor.
+from pathlib import Path
+import warnings
 
-Design decisions, all traceable to Deliverable 1 or Phase 2 findings:
-- Non-centred: required for reliable MCMC convergence (tested above)
-- Student-t: motivated by excess kurtosis 6.6-82.6 found in real data
-- Leverage: motivated by left-skewness found in all three commodities
-- Prior on phi: Beta(20,1.5) mapped to (-1,1), encoding high persistence
-- Prior on sigma_eta: HalfCauchy(0, 0.5) -- weakly informative, positive
-- MCMC: 4 chains, 2000 warmup, 2000 sampling (production);
-         1 chain, 500 warmup, 500 sampling (rolling/fast mode)
-"""
-
+import arviz as az
 import numpy as np
 import pandas as pd
 import pymc as pm
+import pytensor
 import pytensor.tensor as pt
-import arviz as az
-import warnings
-warnings.filterwarnings("ignore")
+from scipy import stats
 
-# Convergence threshold from Deliverable 2
+warnings.filterwarnings("ignore", category=FutureWarning)
+
 RHAT_THRESHOLD = 1.01
+MIN_STRUCTURAL_ESS = 400
+FAST_MIN_ESS = 200
+MODEL_VERSION = "sv-filter-v3-standard-leverage-noncentered"
+DEFAULT_ROLLING_MCMC_ATTEMPTS = (
+    {"chains": 4, "tune": 1_000, "draws": 1_000},
+    {"chains": 4, "tune": 2_000, "draws": 2_000},
+)
+STRUCTURAL_DIAGNOSTIC_VARS = ("mu", "phi", "sigma_eta", "nu", "rho")
+
+
+def _nu_prior(name: str = "nu"):
+    """Degrees of freedom constrained to nu > 2 so variance exists."""
+    nu_minus_two = pm.Exponential(f"{name}_minus_two", lam=0.1)
+    return pm.Deterministic(name, 2.0 + nu_minus_two)
+
+
+def _pt_unit_variance_t_scale(nu):
+    """PyTensor multiplier making a Student-t innovation unit variance."""
+    return pt.sqrt((nu - 2.0) / nu)
+
+
+def _np_unit_variance_t_scale(nu):
+    """NumPy multiplier making a Student-t innovation unit variance."""
+    nu = np.asarray(nu, dtype=float)
+    return np.sqrt((nu - 2.0) / nu)
+
+
+def _noncentered_state_path(mu, phi, sigma_eta, T: int):
+    """Construct h_0,...,h_T from independent standard-normal innovations."""
+    h0_std = pm.Normal("h0_std", mu=0.0, sigma=1.0)
+    eta = pm.Normal("eta", mu=0.0, sigma=1.0, shape=T)
+    stationary_sd = sigma_eta / pt.sqrt(pt.clip(1.0 - phi**2, 1e-8, np.inf))
+    h0 = mu + stationary_sd * h0_std
+
+    def step(eta_t, h_prev, mu_, phi_, sigma_):
+        return mu_ + phi_ * (h_prev - mu_) + sigma_ * eta_t
+
+    h_rest, _ = pytensor.scan(
+        fn=step,
+        sequences=[eta],
+        outputs_info=[h0],
+        non_sequences=[mu, phi, sigma_eta],
+        strict=True,
+    )
+    h = pm.Deterministic("h", pt.concatenate([h0[None], h_rest]))
+    return h, eta
+
+
+def _common_parameters(T: int):
+    mu = pm.Normal("mu", mu=-10.0, sigma=3.0)
+    phi_raw = pm.Beta("phi_raw", alpha=20.0, beta=1.5)
+    phi = pm.Deterministic("phi", 2.0 * phi_raw - 1.0)
+    sigma_eta = pm.HalfCauchy("sigma_eta", beta=0.5)
+    h, eta = _noncentered_state_path(mu, phi, sigma_eta, T)
+    return mu, phi, sigma_eta, h, eta
 
 
 def build_sv_gaussian(returns: np.ndarray, T: int) -> pm.Model:
-    """
-    SV-Gaussian: base model, Deliverable 1 equations (1)-(2).
-    Non-centred parameterisation.
-    """
     with pm.Model() as model:
-        # Priors (Deliverable 1, Section 2.5)
-        mu      = pm.Normal('mu', mu=-10, sigma=3)
-        phi_raw = pm.Beta('phi_raw', alpha=20, beta=1.5)
-        phi     = pm.Deterministic('phi', 2*phi_raw - 1)
-        sigma   = pm.HalfCauchy('sigma_eta', beta=0.5)
-
-        # Non-centred latent log-variance
-        z = pm.AR('z', rho=phi, sigma=1.0,
-                  init_dist=pm.Normal.dist(0, 1/pt.sqrt(1 - phi**2 + 1e-6)),
-                  shape=T)
-        h = pm.Deterministic('h', mu + sigma * z)
-
-        # Observation equation
-        pm.Normal('obs', mu=0, sigma=pt.exp(h / 2), observed=returns)
-
+        _mu, _phi, _sigma, h, _eta = _common_parameters(T)
+        vol = pt.exp(h[:-1] / 2.0)
+        pm.Normal("obs", mu=0.0, sigma=vol, observed=returns)
     return model
 
 
 def build_sv_t(returns: np.ndarray, T: int) -> pm.Model:
-    """
-    SV-t: Student-t innovations, Deliverable 1 equations (3)-(4).
-    Motivated by excess kurtosis found in Phase 2 for all three commodities.
-    """
     with pm.Model() as model:
-        mu      = pm.Normal('mu', mu=-10, sigma=3)
-        phi_raw = pm.Beta('phi_raw', alpha=20, beta=1.5)
-        phi     = pm.Deterministic('phi', 2*phi_raw - 1)
-        sigma   = pm.HalfCauchy('sigma_eta', beta=0.5)
-        # Degrees of freedom: Gamma(2, 0.1) => E[nu]=20, allows heavy tails
-        # but rules out nu<=2 (undefined variance)
-        nu      = pm.Gamma('nu', alpha=2, beta=0.1)
-
-        z = pm.AR('z', rho=phi, sigma=1.0,
-                  init_dist=pm.Normal.dist(0, 1/pt.sqrt(1 - phi**2 + 1e-6)),
-                  shape=T)
-        h = pm.Deterministic('h', mu + sigma * z)
-
-        # Student-t observation: r_t ~ t_nu(0, exp(h_t/2))
-        pm.StudentT('obs', nu=nu, mu=0, sigma=pt.exp(h / 2), observed=returns)
-
+        _mu, _phi, _sigma, h, _eta = _common_parameters(T)
+        nu = _nu_prior()
+        vol = pt.exp(h[:-1] / 2.0)
+        obs_scale = vol * _pt_unit_variance_t_scale(nu)
+        pm.StudentT("obs", nu=nu, mu=0.0, sigma=obs_scale, observed=returns)
     return model
 
 
 def build_sv_leverage(returns: np.ndarray, T: int) -> pm.Model:
-    """
-    SV-Leverage: correlated return and vol shocks, Deliverable 1 eq (5).
-    rho < 0 => negative return raises volatility more (leverage effect).
-
-    EXACT implementation via Cholesky decomposition (not an approximation).
-    Verified by simulation: true parameter values fall within 95% HDI
-    on T=500 synthetic data (tested 2025-07, see project notes).
-
-    Mathematical derivation:
-    In non-centred form: h_t = mu + sigma*z_t, where z_t = phi*z_{t-1} + eta_t*
-    The vol innovation eta_t* is EXACTLY recovered as: eta_t* = z_t - phi*z_{t-1}
-
-    The exact conditional return distribution (Cholesky decomposition):
-      eps_t = rho*eta_t* + sqrt(1-rho^2)*xi_t,  xi_t ~ N(0,1) indep.
-    =>
-      r_t | h_t, eta_t* ~ N(rho * exp(h_t/2) * eta_t*,
-                              (1-rho^2) * exp(h_t))
-
-    Reference: Kim, Shephard & Chib (1998), Jacquier, Polson & Rossi (2004).
-    """
+    """Gaussian SV with corr(epsilon_t, eta_t)=rho and h_{t+1} timing."""
     with pm.Model() as model:
-        mu      = pm.Normal('mu', mu=-10, sigma=3)
-        phi_raw = pm.Beta('phi_raw', alpha=20, beta=1.5)
-        phi     = pm.Deterministic('phi', 2*phi_raw - 1)
-        sigma   = pm.HalfCauchy('sigma_eta', beta=0.5)
-        rho     = pm.Uniform('rho', lower=-1, upper=1)
-
-        # Non-centred latent path
-        z = pm.AR('z', rho=phi, sigma=1.0,
-                  init_dist=pm.Normal.dist(0, 1/pt.sqrt(1 - phi**2 + 1e-6)),
-                  shape=T)
-        h = pm.Deterministic('h', mu + sigma * z)
-
-        # Exact vol innovation: eta_t* = z_t - phi*z_{t-1}
-        # Use z[0] as its own lag for t=0 (one-point boundary approximation;
-        # negligible for T>=100)
-        z_lag = pt.concatenate([[z[0]], z[:-1]])
-        eta   = z - phi * z_lag
-
-        # Exact conditional mean and variance of r_t given h_t, eta_t*
-        mu_r    = rho * pt.exp(h / 2) * eta
-        sigma_r = pt.sqrt(pt.clip(1 - rho**2, 1e-6, 1.0)) * pt.exp(h / 2)
-
-        pm.Normal('obs', mu=mu_r, sigma=sigma_r, observed=returns)
-
+        _mu, _phi, _sigma, h, eta = _common_parameters(T)
+        rho = pm.Uniform("rho", lower=-1.0, upper=1.0)
+        vol = pt.exp(h[:-1] / 2.0)
+        obs_mu = rho * vol * eta
+        obs_sd = pt.sqrt(pt.clip(1.0 - rho**2, 1e-9, 1.0)) * vol
+        pm.Normal("obs", mu=obs_mu, sigma=obs_sd, observed=returns)
     return model
 
 
 def build_sv_t_leverage(returns: np.ndarray, T: int) -> pm.Model:
-    """
-    SV-t-Leverage: combined Student-t and leverage effect.
-    Most general variant, Deliverable 1 Section 2.4.
+    """Leverage SV with a unit-variance Student-t orthogonal innovation.
 
-    Exact leverage implementation (same Cholesky decomposition as
-    SV-Leverage) combined with Student-t observation innovations.
-
-    Note on Student-t + leverage: the Student-t applies to the
-    STANDARDISED residual xi_t (the component of eps_t orthogonal
-    to eta_t*). This is the natural extension: fat tails in the
-    idiosyncratic component, while the leverage channel remains
-    Gaussian (correlated with the vol shock).
+    Conditional on eta_t the orthogonal residual is Student-t. The marginal
+    epsilon_t is a normal-t convolution, not exactly a Student-t distribution;
+    manuscript wording must preserve that distinction.
     """
     with pm.Model() as model:
-        mu      = pm.Normal('mu', mu=-10, sigma=3)
-        phi_raw = pm.Beta('phi_raw', alpha=20, beta=1.5)
-        phi     = pm.Deterministic('phi', 2*phi_raw - 1)
-        sigma   = pm.HalfCauchy('sigma_eta', beta=0.5)
-        nu      = pm.Gamma('nu', alpha=2, beta=0.1)
-        rho     = pm.Uniform('rho', lower=-1, upper=1)
-
-        z = pm.AR('z', rho=phi, sigma=1.0,
-                  init_dist=pm.Normal.dist(0, 1/pt.sqrt(1 - phi**2 + 1e-6)),
-                  shape=T)
-        h = pm.Deterministic('h', mu + sigma * z)
-
-        # Exact vol innovation
-        z_lag = pt.concatenate([[z[0]], z[:-1]])
-        eta   = z - phi * z_lag
-
-        # Leverage-adjusted conditional mean
-        mu_r    = rho * pt.exp(h / 2) * eta
-        sigma_r = pt.sqrt(pt.clip(1 - rho**2, 1e-6, 1.0)) * pt.exp(h / 2)
-
-        # Student-t for fat tails in the leverage-adjusted residual
-        pm.StudentT('obs', nu=nu, mu=mu_r, sigma=sigma_r, observed=returns)
-
+        _mu, _phi, _sigma, h, eta = _common_parameters(T)
+        nu = _nu_prior()
+        rho = pm.Uniform("rho", lower=-1.0, upper=1.0)
+        vol = pt.exp(h[:-1] / 2.0)
+        obs_mu = rho * vol * eta
+        obs_scale = (
+            pt.sqrt(pt.clip(1.0 - rho**2, 1e-9, 1.0))
+            * vol
+            * _pt_unit_variance_t_scale(nu)
+        )
+        pm.StudentT("obs", nu=nu, mu=obs_mu, sigma=obs_scale, observed=returns)
     return model
 
 
 MODEL_BUILDERS = {
-    "SV-Gaussian":   build_sv_gaussian,
-    "SV-t":          build_sv_t,
-    "SV-Leverage":   build_sv_leverage,
+    "SV-Gaussian": build_sv_gaussian,
+    "SV-t": build_sv_t,
+    "SV-Leverage": build_sv_leverage,
     "SV-t-Leverage": build_sv_t_leverage,
 }
 
 
-def fit_sv(returns: np.ndarray,
-           variant: str = "SV-t",
-           chains: int = 2,
-           draws: int = 1000,
-           tune: int = 1000,
-           target_accept: float = 0.95,
-           random_seed: int = 42,
-           fast_mode: bool = False) -> dict:
-    """
-    Fit a Bayesian SV model to a return series.
+def _structural_diagnostics(trace, chains: int) -> dict:
+    var_names = [v for v in STRUCTURAL_DIAGNOSTIC_VARS if v in trace.posterior]
+    if not var_names:
+        return {
+            "max_rhat": np.nan,
+            "min_ess": np.nan,
+            "n_divergences": np.nan,
+            "rhat_by_var": {},
+            "ess_by_var": {},
+            "converged": False,
+        }
 
-    Parameters
-    ----------
-    returns : np.ndarray
-        Log-return series (standardised to zero mean before fitting;
-        mean added back for VaR/ES computation).
-    variant : str
-        One of 'SV-Gaussian', 'SV-t', 'SV-Leverage', 'SV-t-Leverage'.
-    chains : int
-        Number of MCMC chains (4 for production, 1 for rolling).
-    draws : int
-        Posterior samples per chain.
-    tune : int
-        Warmup/tuning steps per chain.
-    target_accept : float
-        NUTS target acceptance rate. Default 0.95 (higher than PyMC's
-        0.8 default) because SV posteriors, particularly the leverage
-        variants, showed tree-depth warnings at lower values during
-        initial testing. This value is used identically in both
-        full-sample and rolling (fast_mode) estimation -- only chains,
-        draws, and tune differ between the two contexts, per the
-        Methodology section.
-    random_seed : int
-        For reproducibility.
-    fast_mode : bool
-        If True: 1 chain, 500 draws, 500 tune. target_accept and
-        max_treedepth are unchanged from the full-sample settings.
-        Used for rolling-window estimation where speed matters.
+    n_chains = int(trace.posterior.sizes.get("chain", chains))
+    rhat_by_var = {}
+    if n_chains > 1:
+        rhat = az.rhat(trace, var_names=var_names)
+        for var in rhat.data_vars:
+            values = np.asarray(rhat[var].values, dtype=float)
+            if np.isfinite(values).any():
+                rhat_by_var[var] = float(np.nanmax(values))
+        max_rhat = max(rhat_by_var.values()) if rhat_by_var else np.nan
+    else:
+        max_rhat = np.nan
 
-    Returns
-    -------
-    dict with keys:
-        trace (ArviZ InferenceData),
-        converged (bool),
-        max_rhat (float),
-        min_ess (float),
-        variant (str),
-        T (int),
-        mean_return (float) -- subtracted before fitting
-    """
+    ess = az.ess(trace, var_names=var_names, method="bulk")
+    ess_by_var = {}
+    for var in ess.data_vars:
+        values = np.asarray(ess[var].values, dtype=float)
+        if np.isfinite(values).any():
+            ess_by_var[var] = float(np.nanmin(values))
+    min_ess = min(ess_by_var.values()) if ess_by_var else np.nan
+
+    if "diverging" in trace.sample_stats:
+        n_divergences = int(trace.sample_stats["diverging"].sum().values)
+    else:
+        n_divergences = 0
+
+    if n_chains > 1:
+        converged = (
+            np.isfinite(max_rhat)
+            and max_rhat < RHAT_THRESHOLD
+            and np.isfinite(min_ess)
+            and min_ess > MIN_STRUCTURAL_ESS
+            and n_divergences == 0
+        )
+    else:
+        converged = (
+            np.isfinite(min_ess)
+            and min_ess > FAST_MIN_ESS
+            and n_divergences == 0
+        )
+    return {
+        "max_rhat": max_rhat,
+        "min_ess": min_ess,
+        "n_divergences": n_divergences,
+        "rhat_by_var": rhat_by_var,
+        "ess_by_var": ess_by_var,
+        "converged": bool(converged),
+    }
+
+
+def fit_sv(
+    returns: np.ndarray,
+    variant: str = "SV-t",
+    chains: int = 2,
+    draws: int = 1000,
+    tune: int = 1000,
+    target_accept: float = 0.95,
+    random_seed: int = 42,
+    fast_mode: bool = False,
+) -> dict:
+    """Fit one SV specification and return structural convergence diagnostics."""
     if variant not in MODEL_BUILDERS:
-        raise ValueError(f"Unknown variant '{variant}'. "
-                         f"Choose from {list(MODEL_BUILDERS.keys())}")
-
+        raise ValueError(f"Unknown variant '{variant}'. Choose from {list(MODEL_BUILDERS)}")
     if fast_mode:
         chains, draws, tune = 1, 500, 500
 
-    T = len(returns)
-    # Demean returns for fitting (SV models assume zero-mean returns)
+    returns = np.asarray(returns, dtype=float)
+    if returns.ndim != 1 or len(returns) < 2 or not np.isfinite(returns).all():
+        raise ValueError("returns must be a finite one-dimensional array")
     mean_return = float(np.mean(returns))
-    returns_demeaned = returns - mean_return
-
-    builder = MODEL_BUILDERS[variant]
-    model   = builder(returns_demeaned, T)
+    demeaned = returns - mean_return
+    model = MODEL_BUILDERS[variant](demeaned, len(demeaned))
 
     try:
         with model:
@@ -252,360 +249,398 @@ def fit_sv(returns: np.ndarray,
                 draws=draws,
                 tune=tune,
                 chains=chains,
-                cores=1,  # Required: sandbox BLAS core detection bug
+                cores=1,
                 progressbar=False,
                 random_seed=random_seed,
                 target_accept=target_accept,
                 nuts_sampler_kwargs={"max_treedepth": 12},
             )
-
-        # Convergence diagnostics (Deliverable 2: R-hat < 1.01)
-        rhat   = az.rhat(trace)
-        # Exclude 'h' (latent path, T-dimensional) from rhat summary
-        # to avoid NaN from single-chain runs
-        scalar_params = [v for v in rhat.data_vars
-                         if v not in ('h', 'z') and
-                         rhat[v].values.ndim == 0]
-        if scalar_params:
-            rhat_values = [float(rhat[v].values) for v in scalar_params
-                           if not np.isnan(float(rhat[v].values))]
-            max_rhat = max(rhat_values) if rhat_values else np.nan
-        else:
-            max_rhat = np.nan
-
-        ess    = az.ess(trace)
-        scalar_ess = [v for v in ess.data_vars if v not in ('h', 'z')]
-        if scalar_ess:
-            ess_values = [float(ess[v].values.min()) for v in scalar_ess
-                          if not np.isnan(float(ess[v].values.min()))]
-            min_ess = min(ess_values) if ess_values else np.nan
-        else:
-            min_ess = np.nan
-
-        # Converged if: R-hat < 1.01 AND ESS > 400 per chain
-        # (or NaN for single-chain fast_mode runs, where R-hat undefined)
-        if np.isnan(max_rhat):
-            converged = min_ess > 200  # relaxed for single-chain fast mode
-        else:
-            converged = (max_rhat < RHAT_THRESHOLD) and (min_ess > 400)
-
+        diagnostics = _structural_diagnostics(trace, chains)
         return {
-            "trace":        trace,
-            "converged":    converged,
-            "max_rhat":     max_rhat,
-            "min_ess":      min_ess,
-            "variant":      variant,
-            "T":            T,
-            "mean_return":  mean_return,
+            "trace": trace,
+            **diagnostics,
+            "variant": variant,
+            "T": len(returns),
+            "mean_return": mean_return,
+            "model_version": MODEL_VERSION,
+            "chains": chains,
+            "draws": draws,
+            "tune": tune,
         }
-
-    except Exception as e:
+    except Exception as exc:
         return {
-            "trace":        None,
-            "converged":    False,
-            "max_rhat":     np.nan,
-            "min_ess":      np.nan,
-            "variant":      variant,
-            "T":            T,
-            "mean_return":  mean_return,
-            "error":        str(e),
+            "trace": None,
+            "converged": False,
+            "max_rhat": np.nan,
+            "min_ess": np.nan,
+            "n_divergences": np.nan,
+            "rhat_by_var": {},
+            "ess_by_var": {},
+            "variant": variant,
+            "T": len(returns),
+            "mean_return": mean_return,
+            "model_version": MODEL_VERSION,
+            "chains": chains,
+            "draws": draws,
+            "tune": tune,
+            "error": str(exc),
         }
 
 
-def forecast_sv_var_es(fit_result: dict,
-                       alpha: float) -> tuple:
-    """
-    One-step-ahead VaR and ES from a fitted SV model.
+def fit_sv_adaptive(
+    returns: np.ndarray,
+    variant: str = "SV-t",
+    target_accept: float = 0.95,
+    random_seed: int = 42,
+    attempts=None,
+) -> dict:
+    """Apply the strict rolling MCMC escalation; never accept a weak trace."""
+    if attempts is None:
+        attempts = DEFAULT_ROLLING_MCMC_ATTEMPTS
+    records = []
+    final_fit = None
+    for attempt_no, cfg in enumerate(attempts, start=1):
+        fit = fit_sv(
+            returns,
+            variant=variant,
+            chains=int(cfg["chains"]),
+            draws=int(cfg["draws"]),
+            tune=int(cfg["tune"]),
+            target_accept=target_accept,
+            random_seed=random_seed + attempt_no - 1,
+            fast_mode=False,
+        )
+        records.append({
+            "attempt": attempt_no,
+            "chains": int(cfg["chains"]),
+            "draws": int(cfg["draws"]),
+            "tune": int(cfg["tune"]),
+            "converged": bool(fit.get("converged", False)),
+            "max_rhat": fit.get("max_rhat", np.nan),
+            "min_ess": fit.get("min_ess", np.nan),
+            "n_divergences": fit.get("n_divergences", np.nan),
+            "rhat_by_var": fit.get("rhat_by_var", {}),
+            "ess_by_var": fit.get("ess_by_var", {}),
+            "error": fit.get("error"),
+        })
+        final_fit = fit
+        if fit.get("converged", False):
+            break
+    if final_fit is None:
+        raise ValueError("at least one MCMC attempt is required")
+    final_fit = dict(final_fit)
+    final_fit["mcmc_attempts"] = records
+    final_fit["accepted_attempt"] = next(
+        (r["attempt"] for r in records if r["converged"]), None
+    )
+    return final_fit
 
-    Uses the posterior predictive distribution:
-    For each MCMC draw s:
-      - Extract h_T^(s) (last latent log-vol)
-      - Simulate r_{T+1}^(s) from the model
-    VaR = -quantile(alpha) of the simulated predictive distribution
-    ES  = -mean of simulated returns below the VaR threshold
 
-    This is a simulation-based approach, not a Gaussian closed form,
-    so it naturally incorporates Student-t tails when SV-t is used.
+def initialize_filter_state(fit_result: dict) -> dict:
+    """Create particles whose h value is the next forecast-date state."""
+    trace = fit_result.get("trace")
+    if trace is None:
+        raise ValueError("Cannot initialize filter state without a posterior trace")
+    state = {
+        "variant": fit_result["variant"],
+        "mean_return": float(fit_result["mean_return"]),
+        "mu": trace.posterior["mu"].values.reshape(-1).astype(float),
+        "phi": trace.posterior["phi"].values.reshape(-1).astype(float),
+        "sigma_eta": trace.posterior["sigma_eta"].values.reshape(-1).astype(float),
+        "h": trace.posterior["h"].values[:, :, -1].reshape(-1).astype(float),
+    }
+    if "nu" in trace.posterior:
+        state["nu"] = trace.posterior["nu"].values.reshape(-1).astype(float)
+    if "rho" in trace.posterior:
+        state["rho"] = trace.posterior["rho"].values.reshape(-1).astype(float)
+    return state
 
-    Parameters
-    ----------
-    fit_result : dict
-        Output of fit_sv().
-    alpha : float
-        Coverage level.
 
-    Returns
-    -------
-    (var, es) as positive loss values, or (np.nan, np.nan) if unavailable.
-    """
-    if fit_result["trace"] is None:
-        return np.nan, np.nan
+def _transition_filter_state(state: dict, rng: np.random.Generator) -> dict:
+    """Draw eta_t and propose h_{t+1}, retaining h_t for today's forecast."""
+    eta = rng.normal(size=len(state["h"]))
+    h_next = (
+        state["mu"]
+        + state["phi"] * (state["h"] - state["mu"])
+        + state["sigma_eta"] * eta
+    )
+    transition = {k: v for k, v in state.items()}
+    transition["eta"] = eta
+    transition["h_next"] = h_next
+    return transition
 
-    try:
-        trace   = fit_result["trace"]
-        variant = fit_result["variant"]
-        mu_ret  = fit_result["mean_return"]
 
-        # Posterior samples of key parameters
-        mu_post    = trace.posterior["mu"].values.flatten()
-        phi_post   = trace.posterior["phi"].values.flatten()
-        sigma_post = trace.posterior["sigma_eta"].values.flatten()
+def _predictive_returns(transition: dict, n_predictive: int, rng: np.random.Generator) -> np.ndarray:
+    """Draw r_t from h_t jointly with the proposed eta_t when leverage is used."""
+    n_particles = len(transition["h"])
+    idx = rng.integers(0, n_particles, size=int(n_predictive))
+    h = transition["h"][idx]
+    eta = transition["eta"][idx]
+    vol = np.exp(h / 2.0)
+    variant = transition["variant"]
+    if variant in ("SV-t", "SV-t-Leverage"):
+        nu = transition["nu"][idx]
+        xi = rng.standard_t(nu) * _np_unit_variance_t_scale(nu)
+    else:
+        xi = rng.normal(size=len(idx))
+    if variant in ("SV-Leverage", "SV-t-Leverage"):
+        rho = transition["rho"][idx]
+        eps = rho * eta + np.sqrt(np.clip(1.0 - rho**2, 1e-12, 1.0)) * xi
+    else:
+        eps = xi
+    return transition["mean_return"] + vol * eps
 
-        # Last h value from the latent path
-        h_last = trace.posterior["h"].values[:, :, -1].flatten()
 
-        n_samples = len(mu_post)
-        rng = np.random.default_rng(42)
+def _observation_loglik(transition: dict, actual_return: float) -> np.ndarray:
+    """Likelihood of r_t given h_t and proposed eta_t for particle weighting."""
+    x = float(actual_return) - transition["mean_return"]
+    h = transition["h"]
+    eta = transition["eta"]
+    vol = np.exp(h / 2.0)
+    variant = transition["variant"]
+    if variant in ("SV-Leverage", "SV-t-Leverage"):
+        rho = transition["rho"]
+        loc = rho * vol * eta
+        base_scale = np.sqrt(np.clip(1.0 - rho**2, 1e-12, 1.0)) * vol
+    else:
+        loc = np.zeros_like(vol)
+        base_scale = vol
+    if variant in ("SV-t", "SV-t-Leverage"):
+        nu = transition["nu"]
+        scale = base_scale * _np_unit_variance_t_scale(nu)
+        return stats.t.logpdf(x, df=nu, loc=loc, scale=np.maximum(scale, 1e-12))
+    return stats.norm.logpdf(x, loc=loc, scale=np.maximum(base_scale, 1e-12))
 
-        # One-step-ahead h forecast for each posterior draw
-        h_next = (mu_post
-                  + phi_post * (h_last - mu_post)
-                  + sigma_post * rng.normal(size=n_samples))
 
-        # One-step-ahead return forecast
-        if variant in ("SV-t", "SV-t-Leverage"):
-            nu_post = trace.posterior["nu"].values.flatten()
-            # Student-t: r = scale * t_nu
-            from scipy.stats import t as t_dist
-            r_pred = np.array([
-                t_dist.rvs(df=nu_post[i], scale=np.exp(h_next[i]/2), random_state=rng)
-                for i in range(n_samples)
-            ]) + mu_ret
+def update_filter_state(transition: dict, actual_return: float, rng: np.random.Generator) -> tuple[dict, float]:
+    """Condition on r_t, resample, and advance particles from h_t to h_{t+1}."""
+    if "h_next" not in transition:
+        raise ValueError("transition is missing h_next; call _transition_filter_state first")
+    logw = _observation_loglik(transition, actual_return)
+    finite = np.isfinite(logw)
+    if not finite.any():
+        weights = np.full(len(logw), 1.0 / len(logw))
+    else:
+        floor = np.nanmax(logw[finite]) - 1_000.0
+        logw = np.where(finite, logw, floor)
+        logw -= np.max(logw)
+        weights = np.exp(logw)
+        total = weights.sum()
+        if not np.isfinite(total) or total <= 0.0:
+            weights = np.full(len(logw), 1.0 / len(logw))
         else:
-            r_pred = rng.normal(0, np.exp(h_next/2)) + mu_ret
+            weights /= total
+    filter_ess = float(1.0 / np.sum(weights**2))
+    idx = rng.choice(len(weights), size=len(weights), replace=True, p=weights)
+    new_state = {
+        "variant": transition["variant"],
+        "mean_return": transition["mean_return"],
+    }
+    for key in ("mu", "phi", "sigma_eta", "nu", "rho"):
+        if key in transition:
+            new_state[key] = transition[key][idx]
+    new_state["h"] = transition["h_next"][idx]
+    return new_state, filter_ess
 
-        # VaR and ES from predictive distribution
-        var_threshold = -np.quantile(r_pred, alpha)
-        tail_losses   = r_pred[r_pred < -var_threshold]
-        es = (-tail_losses.mean()) if len(tail_losses) > 0 else var_threshold
 
-        return float(var_threshold), float(es)
+def predictive_var_es(r_pred: np.ndarray, alpha: float) -> tuple[float, float]:
+    """Compute positive-loss VaR and ES from predictive returns."""
+    q = float(np.quantile(r_pred, alpha))
+    var = -q
+    tail = r_pred[r_pred <= q]
+    es = -float(tail.mean()) if len(tail) else var
+    return float(var), float(es)
 
-    except Exception:
+
+def forecast_sv_var_es(fit_result: dict, alpha: float, n_predictive: int = 20_000, random_seed: int = 42) -> tuple:
+    """One-step forecast after a fresh fit using its h_T forecast-date state."""
+    if fit_result.get("trace") is None:
         return np.nan, np.nan
+    state = initialize_filter_state(fit_result)
+    rng = np.random.default_rng(random_seed)
+    transition = _transition_filter_state(state, rng)
+    r_pred = _predictive_returns(transition, n_predictive, rng)
+    return predictive_var_es(r_pred, alpha)
 
 
-def rolling_sv_var_es(returns: pd.Series,
-                      variant: str = "SV-t",
-                      window: int = 1000,
-                      refit_every: int = 42,
-                      target_accept: float = 0.95,
-                      alphas: list = None,
-                      checkpoint_path=None,
-                      checkpoint_every: int = 50) -> pd.DataFrame:
-    """
-    Rolling walk-forward VaR/ES for SV models.
+def _state_sidecar_path(checkpoint_path: Path) -> Path:
+    return checkpoint_path.with_suffix(".state.npz")
 
-    Full MCMC re-estimation every refit_every trading days (default 42,
-    approximately bimonthly); cached posterior used between refits. This
-    is stated as a computational approximation and is conservative
-    relative to GARCH (which refits daily).
 
-    target_accept is threaded through explicitly here (rather than left
-    to fit_sv's own default) so that the value actually used in every
-    rolling MCMC fit is visible in this function's signature and in any
-    log or call trace, matching what the Methodology section reports.
+def _save_filter_state(
+    path: Path,
+    state: dict | None,
+    next_i: int,
+    active_block_start: int,
+    variant: str,
+):
+    """Persist either an active particle state or an explicit unavailable block."""
+    arrays = {
+        "next_i": np.array([next_i], dtype=int),
+        "active_block_start": np.array([active_block_start], dtype=int),
+        "variant": np.array([variant]),
+        "has_state": np.array([state is not None], dtype=bool),
+    }
+    if state is not None:
+        arrays["mean_return"] = np.array([state["mean_return"]], dtype=float)
+        for key in ("mu", "phi", "sigma_eta", "nu", "rho", "h"):
+            if key in state:
+                arrays[key] = np.asarray(state[key])
+    np.savez_compressed(path, **arrays)
 
-    Incremental checkpointing: if checkpoint_path is given, partial
-    progress is saved to disk every checkpoint_every steps, and an
-    existing partial checkpoint at that path is loaded and resumed from
-    on start rather than recomputed from scratch. This exists because a
-    long-running SV variant (multiple hours) with no incremental save
-    lost real progress to a crash during actual production use -- see
-    project notes. The MCMC refit schedule is not perfectly preserved
-    across a resume (a fresh refit occurs at the resume point rather
-    than reconstructing the exact original schedule), which is a minor,
-    stated approximation, not a silent one.
 
-    Parameters
-    ----------
-    returns : pd.Series
-        Clean log-return series.
-    variant : str
-        SV variant name.
-    window : int
-        Rolling window length W.
-    refit_every : int
-        Days between full MCMC re-estimations.
-    target_accept : float
-        NUTS target acceptance rate, passed through to every fit_sv()
-        call in this rolling loop. Default 0.95, matching full-sample
-        estimation -- see fit_sv() docstring for justification.
-    alphas : list
-        Coverage levels.
-    checkpoint_path : Path or None
-        If given, save partial results here every checkpoint_every
-        steps, and resume from here if the file already exists.
-    checkpoint_every : int
-        Steps between incremental checkpoint saves. Default 50 --
-        roughly every 1-2 refit cycles, so at most ~50 steps of
-        progress can be lost to a crash, not an entire variant.
+def _load_filter_state(path: Path) -> tuple[dict | None, int, int, str]:
+    data = np.load(path, allow_pickle=False)
+    variant = str(data["variant"][0])
+    has_state = bool(data["has_state"][0])
+    state = None
+    if has_state:
+        state = {
+            "variant": variant,
+            "mean_return": float(data["mean_return"][0]),
+        }
+        for key in ("mu", "phi", "sigma_eta", "nu", "rho", "h"):
+            if key in data.files:
+                state[key] = data[key]
+    return (
+        state,
+        int(data["next_i"][0]),
+        int(data["active_block_start"][0]),
+        variant,
+    )
 
-    Returns
-    -------
-    pd.DataFrame matching structure of rolling_var_es() output.
-    """
+
+def rolling_sv_var_es(
+    returns: pd.Series,
+    variant: str = "SV-t",
+    window: int = 1000,
+    refit_every: int = 42,
+    target_accept: float = 0.95,
+    alphas: list | None = None,
+    checkpoint_path: Path | None = None,
+    checkpoint_every: int = 50,
+    n_predictive: int = 20_000,
+    random_seed: int = 42,
+    mcmc_attempts=None,
+) -> pd.DataFrame:
+    """Walk-forward VaR/ES with fixed scheduled refits and daily state filtering."""
     if alphas is None:
         alphas = [0.01, 0.05]
+    if variant not in MODEL_BUILDERS:
+        raise ValueError(f"Unknown variant: {variant}")
+    if len(returns) <= window:
+        raise ValueError("Series length must exceed rolling window")
+    if refit_every < 1:
+        raise ValueError("refit_every must be >= 1")
+    if mcmc_attempts is None:
+        mcmc_attempts = DEFAULT_ROLLING_MCMC_ATTEMPTS
 
-    ret_array    = returns.values
-    dates        = returns.index
-    n            = len(ret_array)
-    n_forecasts  = n - window
-    results      = []
-    n_failures   = 0
-    last_fit     = None
-    last_fit_idx = -refit_every  # force refit on first step
-    start_i      = 0
+    ret_array = returns.to_numpy(dtype=float)
+    dates = returns.index
+    n_forecasts = len(ret_array) - window
+    results: list[dict] = []
+    n_failed_refits = 0
+    filter_state = None
+    active_block_start = 0
+    start_i = 0
 
-    # Resume from an existing partial checkpoint, if present
-    if checkpoint_path is not None and checkpoint_path.exists():
-        try:
-            existing = pd.read_csv(checkpoint_path, parse_dates=["date"])
-            existing = existing.set_index("date")
-            n_existing = len(existing)
-            if 0 < n_existing < n_forecasts:
-                results = existing.reset_index().to_dict("records")
-                start_i = n_existing
-                n_failures = int(existing["estimation_failed"].sum())
-                print(f"  [{variant}] Resuming from checkpoint: "
-                      f"{start_i}/{n_forecasts} steps already done "
-                      f"(from a previous run that did not finish).")
-            elif n_existing >= n_forecasts:
-                print(f"  [{variant}] Checkpoint already complete "
-                      f"({n_existing} steps) -- returning it as-is.")
-                return existing
-        except Exception as e:
-            print(f"  [{variant}] WARNING: could not read existing "
-                  f"checkpoint ({e}); starting from scratch.")
-            results = []
-            start_i = 0
+    checkpoint_path = Path(checkpoint_path) if checkpoint_path is not None else None
+    sidecar = _state_sidecar_path(checkpoint_path) if checkpoint_path else None
+
+    if checkpoint_path and checkpoint_path.exists():
+        existing = pd.read_csv(checkpoint_path, parse_dates=["date"])
+        if len(existing) >= n_forecasts:
+            return existing.set_index("date")
+        if len(existing) > 0:
+            if sidecar is None or not sidecar.exists():
+                raise RuntimeError(
+                    "Partial CSV exists without matching filter-state sidecar; "
+                    "refusing an inexact resume. Remove the partial checkpoint to restart cleanly."
+                )
+            filter_state, state_next_i, active_block_start, state_variant = _load_filter_state(sidecar)
+            if state_next_i != len(existing):
+                raise RuntimeError("Checkpoint CSV/state sidecar are out of sync")
+            if state_variant != variant:
+                raise RuntimeError("Checkpoint state belongs to a different SV variant")
+            results = existing.to_dict("records")
+            start_i = len(existing)
+            refit_rows = existing[existing.get("refit", False).fillna(False).astype(bool)] if "refit" in existing else existing.iloc[0:0]
+            if len(refit_rows) and "mcmc_converged" in refit_rows:
+                n_failed_refits = int((~refit_rows["mcmc_converged"].fillna(False).astype(bool)).sum())
 
     for i in range(start_i, n_forecasts):
-        train         = ret_array[i : i + window]
         actual_return = ret_array[i + window]
-        forecast_date = dates[i + window]
+        row = {
+            "date": dates[i + window],
+            "actual_return": actual_return,
+            "estimation_failed": False,
+            "refit": False,
+            "mcmc_converged": np.nan,
+        }
 
-        row = {"date": forecast_date, "actual_return": actual_return,
-               "estimation_failed": False}
-
-        # Re-estimate if due
-        if (i - last_fit_idx) >= refit_every:
-            fit = fit_sv(train, variant=variant, fast_mode=True,
-                         target_accept=target_accept,
-                         random_seed=42 + i)
-            if fit["converged"] or fit["trace"] is not None:
-                last_fit     = fit
-                last_fit_idx = i
-                if not fit["converged"]:
-                    print(f"  [{variant}] step {i}: "
-                          f"did not fully converge "
-                          f"(max_rhat={fit['max_rhat']:.4f}); "
-                          f"using trace anyway")
+        scheduled_refit = (i % refit_every) == 0
+        if scheduled_refit:
+            active_block_start = i
+            train = ret_array[i : i + window]
+            fit = fit_sv_adaptive(
+                train,
+                variant=variant,
+                target_accept=target_accept,
+                random_seed=random_seed + i,
+                attempts=mcmc_attempts,
+            )
+            row["refit"] = True
+            row["mcmc_converged"] = bool(fit.get("converged", False))
+            row["mcmc_attempt"] = fit.get("accepted_attempt", np.nan)
+            row["mcmc_max_rhat"] = fit.get("max_rhat", np.nan)
+            row["mcmc_min_ess"] = fit.get("min_ess", np.nan)
+            row["mcmc_divergences"] = fit.get("n_divergences", np.nan)
+            row["mcmc_attempts_json"] = str(fit.get("mcmc_attempts", []))
+            if not fit.get("converged", False):
+                n_failed_refits += 1
+                filter_state = None
             else:
-                n_failures += 1
-                last_fit = None
+                filter_state = initialize_filter_state(fit)
 
-        if last_fit is None:
+        if filter_state is None:
             row["estimation_failed"] = True
+            row["filter_ess"] = np.nan
             for alpha in alphas:
                 row[f"var_{alpha}"] = np.nan
-                row[f"es_{alpha}"]  = np.nan
+                row[f"es_{alpha}"] = np.nan
         else:
+            step_rng = np.random.default_rng(random_seed * 1_000_003 + i)
+            transition = _transition_filter_state(filter_state, step_rng)
+            r_pred = _predictive_returns(transition, n_predictive, step_rng)
             for alpha in alphas:
-                var, es = forecast_sv_var_es(last_fit, alpha)
+                var, es = predictive_var_es(r_pred, alpha)
                 row[f"var_{alpha}"] = var
-                row[f"es_{alpha}"]  = es
+                row[f"es_{alpha}"] = es
+            filter_state, filter_ess = update_filter_state(
+                transition, actual_return, step_rng
+            )
+            row["filter_ess"] = filter_ess
 
         results.append(row)
 
-        if (i + 1) % 100 == 0:
-            print(f"  [{variant}] {i+1}/{n_forecasts} "
-                  f"(MCMC refits: {(i - (n_forecasts - i) % refit_every) // refit_every + 1}) "
-                  f"failures: {n_failures}")
-
-        if checkpoint_path is not None and (i + 1) % checkpoint_every == 0:
-            pd.DataFrame(results).set_index("date").to_csv(checkpoint_path)
+        if checkpoint_path and (i + 1) % checkpoint_every == 0:
+            checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+            pd.DataFrame(results).to_csv(checkpoint_path, index=False)
+            _save_filter_state(
+                sidecar, filter_state, i + 1, active_block_start, variant
+            )
 
     df = pd.DataFrame(results).set_index("date")
-    if checkpoint_path is not None:
-        df.to_csv(checkpoint_path)  # final save, always
-    total_steps = n_forecasts
-    if n_failures > 0:
-        print(f"  WARNING [{variant}]: {n_failures} failed steps "
-              f"({100*n_failures/total_steps:.1f}%)")
-    else:
-        print(f"  [{variant}]: completed {total_steps} steps, "
-              f"0 failures.")
+    if checkpoint_path:
+        checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+        df.to_csv(checkpoint_path)
+        _save_filter_state(
+            sidecar, filter_state, n_forecasts, active_block_start, variant
+        )
+
+    if n_failed_refits:
+        print(
+            f"WARNING [{variant}]: {n_failed_refits} scheduled MCMC refits failed "
+            "after escalation; their complete forecast blocks remain unavailable"
+        )
     return df
-
-
-if __name__ == "__main__":
-    """
-    Integration test: fit all four SV variants on real gold data
-    (short window for speed) and verify:
-    1. All four models run without error
-    2. Parameters are in plausible ranges
-    3. VaR and ES satisfy basic ordering constraints
-    4. Convergence diagnostics are available
-    """
-    import sys
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from data_utils import load_all_returns
-
-    print("=== SV MODEL INTEGRATION TEST ===")
-    print("All four variants, real gold data, short window\n")
-
-    all_returns = load_all_returns(verbose=False)
-    gold = all_returns["gold"].values[-300:]  # last 300 obs for speed
-
-    n_succeeded = 0
-    n_failed = 0
-    failed_variants = []
-
-    for variant in MODEL_BUILDERS:
-        print(f"\n--- {variant} ---")
-        result = fit_sv(gold, variant=variant, fast_mode=True, random_seed=42)
-
-        if result["trace"] is None:
-            print(f"  FAILED: {result.get('error', 'unknown error')}")
-            n_failed += 1
-            failed_variants.append(variant)
-            continue
-
-        print(f"  Converged: {result['converged']}")
-        print(f"  Max R-hat: {result['max_rhat']:.4f}")
-        print(f"  Min ESS:   {result['min_ess']:.1f}")
-
-        # Posterior means
-        trace = result["trace"]
-        mu_mean  = float(trace.posterior["mu"].mean())
-        phi_mean = float(trace.posterior["phi"].mean())
-        sig_mean = float(trace.posterior["sigma_eta"].mean())
-        print(f"  mu={mu_mean:.3f}, phi={phi_mean:.3f}, sigma={sig_mean:.3f}")
-
-        # Sanity: phi should be in (-1,1), sigma > 0, mu typically negative
-        assert -1 < phi_mean < 1, f"phi out of range: {phi_mean}"
-        assert sig_mean > 0,      f"sigma <= 0: {sig_mean}"
-
-        # VaR/ES check
-        var01, es01 = forecast_sv_var_es(result, 0.01)
-        var05, es05 = forecast_sv_var_es(result, 0.05)
-        assert var01 > var05 > 0,  f"VaR ordering violated"
-        assert es01  > var01,      f"ES < VaR at same level"
-        print(f"  99%VaR={var01:.4f}, ES={es01:.4f} | "
-              f"95%VaR={var05:.4f} -- ordering: OK")
-        n_succeeded += 1
-
-    print()
-    if n_failed > 0:
-        print(f"=== {n_failed}/{len(MODEL_BUILDERS)} VARIANTS FAILED: "
-              f"{failed_variants} ===")
-        print("Do NOT proceed to production_runner.py until every variant "
-              "here succeeds. A failure above means the environment is not "
-              "correctly set up (check dependency versions), not that the "
-              "model specification is wrong.")
-        raise SystemExit(1)
-    else:
-        print(f"=== ALL {n_succeeded}/{len(MODEL_BUILDERS)} VARIANTS "
-              f"PASSED ===")
