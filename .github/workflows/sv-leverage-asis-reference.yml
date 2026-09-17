@@ -1,11 +1,6 @@
 name: sv-leverage-asis-reference
 
 on:
-  pull_request:
-    paths:
-      - 'scripts/diagnose_sv_leverage_asis_reference.R'
-      - 'scripts/summarize_sv_leverage_asis_reference.py'
-      - '.github/workflows/sv-leverage-asis-reference.yml'
   workflow_dispatch:
 
 permissions:
