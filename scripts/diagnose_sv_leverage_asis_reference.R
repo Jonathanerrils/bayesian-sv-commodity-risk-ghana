@@ -3,12 +3,14 @@
 # Reference ASIS diagnostic for Gaussian stochastic volatility with leverage.
 #
 # This uses the established leverage sampler in the CRAN package `stochvol`.
-# It is intentionally diagnostic-only.  The sampler can match our priors for
+# It is intentionally diagnostic-only. The sampler can match our priors for
 # mu, phi, rho and stationary h0 exactly, but it cannot represent our
-# Half-Cauchy(0.5) prior on sigma_eta.  For sigma_eta^2 we therefore use an
-# inverse-gamma reference prior with shape 0.5 and scale chosen so that the
-# median of sigma_eta^2 is approximately 0.25, matching the Half-Cauchy scale's
-# median after squaring.  This retains a heavy right tail but is not identical.
+# Half-Cauchy(0.5) prior on sigma_eta. `stochvol` additionally requires the
+# inverse-gamma shape parameter for sigma_eta^2 to be strictly greater than 2.
+# We therefore use shape 2.1 (close to that lower admissible boundary) and
+# choose its scale so the median of sigma_eta^2 is 0.25, equal to the squared
+# median of Half-Cauchy(0.5). This is a reference mixing diagnostic only and is
+# never treated as a production-prior-equivalent fit.
 
 args <- commandArgs(trailingOnly = TRUE)
 get_arg <- function(flag, default = NULL) {
@@ -79,20 +81,24 @@ if (case == "synthetic") {
 y <- as.numeric(y - mean(y))
 
 # Half-Cauchy(0.5) on sigma has median sigma=0.5, hence median sigma^2=0.25.
-# If X ~ InvGamma(a=0.5, scale=b), 1/X ~ Gamma(a=0.5, rate=b).
-# Choosing b = 0.25 * qgamma(0.5, shape=0.5, rate=1) matches that median.
-sigma2_scale <- 0.25 * qgamma(0.5, shape = 0.5, rate = 1)
+# `stochvol` requires inverse-gamma shape > 2.  For X ~ InvGamma(a, scale=b),
+# median(X) = b / qgamma(0.5, shape=a, rate=1).  Set a=2.1 and solve for b.
+sigma2_shape <- 2.1
+sigma2_target_median <- 0.25
+sigma2_scale <- sigma2_target_median * qgamma(
+  0.5, shape = sigma2_shape, rate = 1
+)
 
 priors <- specify_priors(
   mu = sv_normal(mean = -10, sd = 3),
   phi = sv_beta(shape1 = 20, shape2 = 1.5),
-  sigma2 = sv_inverse_gamma(shape = 0.5, scale = sigma2_scale),
+  sigma2 = sv_inverse_gamma(shape = sigma2_shape, scale = sigma2_scale),
   nu = sv_infinity(),
   rho = sv_beta(shape1 = 1, shape2 = 1),
   latent0_variance = "stationary"
 )
 
-# The general leverage sampler uses ASIS when interweave=TRUE.  We also request
+# The general leverage sampler uses ASIS when interweave=TRUE. We also request
 # correction for the auxiliary-mixture approximation so this reference run is
 # not knowingly relying on the uncorrected approximation.
 set.seed(if (case == "synthetic") 20260917L else 42L)
@@ -133,10 +139,13 @@ metadata <- data.frame(
   interweave = TRUE,
   correct_model_misspecification = TRUE,
   stochvol_version = as.character(packageVersion("stochvol")),
-  sigma2_reference_prior = sprintf("InvGamma(shape=0.5,scale=%.12g)", sigma2_scale),
-  sigma2_reference_prior_median = 0.25,
+  sigma2_reference_prior = sprintf(
+    "InvGamma(shape=%.3f,scale=%.12g)", sigma2_shape, sigma2_scale
+  ),
+  sigma2_reference_prior_median = sigma2_target_median,
   production_sigma_prior = "HalfCauchy(scale=0.5) on sigma_eta",
   prior_match_exact = FALSE,
+  reference_only = TRUE,
   truth_mu = if (case == "synthetic") truth[["mu"]] else NA_real_,
   truth_phi = if (case == "synthetic") truth[["phi"]] else NA_real_,
   truth_sigma = if (case == "synthetic") truth[["sigma"]] else NA_real_,
