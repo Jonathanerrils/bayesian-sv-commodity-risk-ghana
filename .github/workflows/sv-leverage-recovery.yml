@@ -1,10 +1,6 @@
 name: sv-leverage-recovery
 
 on:
-  pull_request:
-    paths:
-      - 'scripts/diagnose_sv_leverage_recovery.py'
-      - '.github/workflows/sv-leverage-recovery.yml'
   workflow_dispatch:
 
 permissions:
