@@ -1,10 +1,6 @@
 name: sv-leverage-centered
 
 on:
-  pull_request:
-    paths:
-      - 'scripts/diagnose_sv_leverage_centered.py'
-      - '.github/workflows/sv-leverage-centered.yml'
   workflow_dispatch:
 
 permissions:
