@@ -15,20 +15,26 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from backtests import apply_bonferroni_reporting, run_all_backtests
+from checkpoint_safety import parse_bool_series
 from data_utils import load_all_prices, load_all_returns
 from garch_model import historical_simulation_var_es, rolling_var_es
 from ou_model import OU_MODEL_VERSION, rolling_ou_var_es
-from sv_model import DEFAULT_ROLLING_MCMC_ATTEMPTS, MODEL_VERSION, rolling_sv_var_es
+from sv_model import (
+    DEFAULT_ROLLING_MCMC_ATTEMPTS,
+    MODEL_VERSION,
+    PRIMARY_SV_VARIANTS,
+    rolling_sv_var_es,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 RESULTS_DIR = PROJECT_ROOT / "outputs" / "v2"
 TABLES_DIR = RESULTS_DIR / "tables"
 CHECKPOINT_ROOT = PROJECT_ROOT / "checkpoints" / "v2"
 
-PIPELINE_VERSION = "risk-pipeline-v4-sv-timing-ou-pairs-availability-dual-multiplicity"
+PIPELINE_VERSION = "risk-pipeline-v5-primary-symmetric-sv-checkpoint-safe"
 ALPHAS = [0.01, 0.05]
 COMMODITIES = ["cocoa", "gold", "oil"]
-SV_VARIANTS = ["SV-Gaussian", "SV-t", "SV-Leverage", "SV-t-Leverage"]
+SV_VARIANTS = list(PRIMARY_SV_VARIANTS)
 GARCH_BENCHMARK_SPECS = {
     "GARCH": ("GARCH", "normal"),
     "GARCH-t": ("GARCH", "t"),
@@ -38,12 +44,9 @@ GARCH_BENCHMARK_SPECS = {
 BENCHMARK_MODELS = [*GARCH_BENCHMARK_SPECS, "OU", "HistSim"]
 ALL_MODELS = [*BENCHMARK_MODELS, *SV_VARIANTS]
 
-# Two multiplicity families are reported by design, before seeing repaired results.
-# 1) Per-test family: each named test across model x commodity x confidence cells.
+# Frozen v5 multiplicity families: 8 models x 3 commodities x 2 alphas.
 PER_TEST_BONFERRONI_FAMILY_SIZE = len(ALL_MODELS) * len(COMMODITIES) * len(ALPHAS)
-# 2) Global-primary family: all three primary tests across all comparison cells.
 GLOBAL_PRIMARY_BONFERRONI_FAMILY_SIZE = PER_TEST_BONFERRONI_FAMILY_SIZE * 3
-# Backwards-compatible alias; always means the manuscript-style per-test family.
 BONFERRONI_FAMILY_SIZE = PER_TEST_BONFERRONI_FAMILY_SIZE
 
 
@@ -112,6 +115,8 @@ def run_benchmark(commodity, model, returns, prices, window, refit_every, predic
 
 
 def run_sv(commodity, variant, returns, window, refit_every, predictive_draws, logger):
+    if variant not in SV_VARIANTS:
+        raise ValueError(f"{variant!r} is not in the frozen v5 primary SV family")
     path = checkpoint_path(commodity, variant, window, refit_every, predictive_draws)
     expected = len(returns) - window
     if path.exists():
@@ -147,7 +152,7 @@ def _valid_forecast_mask(fc: pd.DataFrame, alphas=None) -> pd.Series:
             return pd.Series(False, index=fc.index, dtype=bool)
         mask &= np.isfinite(pd.to_numeric(fc[col], errors="coerce"))
     if "estimation_failed" in fc:
-        mask &= ~fc["estimation_failed"].fillna(True).astype(bool)
+        mask &= ~parse_bool_series(fc["estimation_failed"], missing=True)
     return mask
 
 
@@ -306,8 +311,6 @@ def main():
     forecasts = {}
     for commodity in commodities:
         returns = returns_all[commodity]
-        # Preserve the full price index. OU aligns each retained return to its
-        # exact conditioning/current price pair internally.
         prices = prices_all[commodity]
         if not args.sv_only:
             for model in BENCHMARK_MODELS:

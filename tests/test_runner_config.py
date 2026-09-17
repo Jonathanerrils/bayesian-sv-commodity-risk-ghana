@@ -12,6 +12,7 @@ from production_runner import (
     OU_MODEL_VERSION,
     PER_TEST_BONFERRONI_FAMILY_SIZE,
     PIPELINE_VERSION,
+    SV_VARIANTS,
     run_key,
 )
 
@@ -26,13 +27,18 @@ def test_run_key_changes_with_window_and_refit_and_versions():
     assert "r42" in a
     assert PIPELINE_VERSION in a
     assert OU_MODEL_VERSION in a
-    assert "pipeline-v4" in a
+    assert "pipeline-v5" in a
+
+
+def test_v5_primary_model_family_is_frozen():
+    assert SV_VARIANTS == ["SV-Gaussian", "SV-t"]
+    assert len(ALL_MODELS) == 8
 
 
 def test_bonferroni_families_are_fixed_before_results():
     cells = len(ALL_MODELS) * len(COMMODITIES) * len(ALPHAS)
-    assert cells == 60
+    assert cells == 48
     assert PER_TEST_BONFERRONI_FAMILY_SIZE == cells
-    assert BONFERRONI_FAMILY_SIZE == 60
+    assert BONFERRONI_FAMILY_SIZE == 48
     assert GLOBAL_PRIMARY_BONFERRONI_FAMILY_SIZE == cells * 3
-    assert GLOBAL_PRIMARY_BONFERRONI_FAMILY_SIZE == 180
+    assert GLOBAL_PRIMARY_BONFERRONI_FAMILY_SIZE == 144

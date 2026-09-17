@@ -8,10 +8,10 @@ For a mean-adjusted return x_t, the symmetric state equation is
     x_t = exp(h_t / 2) * epsilon_t
     h_{t+1} = mu + phi * (h_t - mu) + sigma_eta * eta_t
 
-For leverage variants, epsilon_t and eta_t are correlated through rho. Thus a
-negative return shock can alter the distribution of h_{t+1}; the return at t is
-not correlated with the innovation that created h_t. This is the forward
-leverage timing used throughout this implementation.
+The frozen v5 primary family contains only the symmetric SV-Gaussian and SV-t
+specifications. Leverage builders remain available for diagnostic/sensitivity
+work so the audit trail is reproducible, but they are not production-primary
+models after failing the pre-production convergence programme.
 
 A rolling fit over T observed returns contains states h_0,...,h_T. The final
 posterior state h_T is therefore the state for the next forecast date. Daily
@@ -39,17 +39,26 @@ import pytensor
 import pytensor.tensor as pt
 from scipy import stats
 
+from checkpoint_safety import (
+    checkpoint_schema_array,
+    parse_bool_series,
+    parse_bool_value,
+    validate_checkpoint_schema,
+)
+
 warnings.filterwarnings("ignore", category=FutureWarning)
 
 RHAT_THRESHOLD = 1.01
 MIN_STRUCTURAL_ESS = 400
 FAST_MIN_ESS = 200
-MODEL_VERSION = "sv-filter-v3-standard-leverage-noncentered"
+MODEL_VERSION = "sv-filter-v4-primary-symmetric-noncentered"
 DEFAULT_ROLLING_MCMC_ATTEMPTS = (
     {"chains": 4, "tune": 1_000, "draws": 1_000},
     {"chains": 4, "tune": 2_000, "draws": 2_000},
 )
 STRUCTURAL_DIAGNOSTIC_VARS = ("mu", "phi", "sigma_eta", "nu", "rho")
+PRIMARY_SV_VARIANTS = ("SV-Gaussian", "SV-t")
+DIAGNOSTIC_SV_VARIANTS = ("SV-Leverage", "SV-t-Leverage")
 
 
 def _nu_prior(name: str = "nu"):
@@ -118,7 +127,7 @@ def build_sv_t(returns: np.ndarray, T: int) -> pm.Model:
 
 
 def build_sv_leverage(returns: np.ndarray, T: int) -> pm.Model:
-    """Gaussian SV with corr(epsilon_t, eta_t)=rho and h_{t+1} timing."""
+    """Diagnostic-only Gaussian SV with corr(epsilon_t, eta_t)=rho."""
     with pm.Model() as model:
         _mu, _phi, _sigma, h, eta = _common_parameters(T)
         rho = pm.Uniform("rho", lower=-1.0, upper=1.0)
@@ -130,11 +139,12 @@ def build_sv_leverage(returns: np.ndarray, T: int) -> pm.Model:
 
 
 def build_sv_t_leverage(returns: np.ndarray, T: int) -> pm.Model:
-    """Leverage SV with a unit-variance Student-t orthogonal innovation.
+    """Diagnostic-only leverage SV with a Student-t orthogonal innovation.
 
     Conditional on eta_t the orthogonal residual is Student-t. The marginal
-    epsilon_t is a normal-t convolution, not exactly a Student-t distribution;
-    manuscript wording must preserve that distinction.
+    epsilon_t is a normal-t convolution, not exactly a Student-t distribution.
+    This legacy specification is retained only to reproduce audit diagnostics;
+    it is excluded from the frozen v5 primary family.
     """
     with pm.Model() as model:
         _mu, _phi, _sigma, h, eta = _common_parameters(T)
@@ -151,6 +161,8 @@ def build_sv_t_leverage(returns: np.ndarray, T: int) -> pm.Model:
     return model
 
 
+# All builders stay addressable for reproducible diagnostics. Production imports
+# PRIMARY_SV_VARIANTS explicitly and therefore cannot select leverage models.
 MODEL_BUILDERS = {
     "SV-Gaussian": build_sv_gaussian,
     "SV-t": build_sv_t,
@@ -371,7 +383,7 @@ def _transition_filter_state(state: dict, rng: np.random.Generator) -> dict:
 
 
 def _predictive_returns(transition: dict, n_predictive: int, rng: np.random.Generator) -> np.ndarray:
-    """Draw r_t from h_t jointly with the proposed eta_t when leverage is used."""
+    """Draw r_t from h_t jointly with proposed eta_t for diagnostic leverage."""
     n_particles = len(transition["h"])
     idx = rng.integers(0, n_particles, size=int(n_predictive))
     h = transition["h"][idx]
@@ -474,8 +486,10 @@ def _save_filter_state(
     active_block_start: int,
     variant: str,
 ):
-    """Persist either an active particle state or an explicit unavailable block."""
+    """Persist active particle state or an explicit unavailable block safely."""
     arrays = {
+        "checkpoint_schema_version": checkpoint_schema_array(),
+        "model_version": np.array([MODEL_VERSION]),
         "next_i": np.array([next_i], dtype=int),
         "active_block_start": np.array([active_block_start], dtype=int),
         "variant": np.array([variant]),
@@ -490,24 +504,55 @@ def _save_filter_state(
 
 
 def _load_filter_state(path: Path) -> tuple[dict | None, int, int, str]:
-    data = np.load(path, allow_pickle=False)
-    variant = str(data["variant"][0])
-    has_state = bool(data["has_state"][0])
-    state = None
-    if has_state:
-        state = {
-            "variant": variant,
-            "mean_return": float(data["mean_return"][0]),
-        }
-        for key in ("mu", "phi", "sigma_eta", "nu", "rho", "h"):
-            if key in data.files:
-                state[key] = data[key]
-    return (
-        state,
-        int(data["next_i"][0]),
-        int(data["active_block_start"][0]),
-        variant,
-    )
+    """Load a sidecar only when its schema and SV model version match exactly."""
+    with np.load(path, allow_pickle=False) as data:
+        schema_values = (
+            data["checkpoint_schema_version"]
+            if "checkpoint_schema_version" in data.files
+            else np.array([], dtype=int)
+        )
+        validate_checkpoint_schema(data.files, schema_values)
+        if "model_version" not in data.files:
+            raise RuntimeError(
+                "SV checkpoint sidecar has no model version; refusing an inexact "
+                "resume. Restart the checkpoint under the current pipeline."
+            )
+        sidecar_model_version = str(np.asarray(data["model_version"]).reshape(-1)[0])
+        if sidecar_model_version != MODEL_VERSION:
+            raise RuntimeError(
+                f"SV checkpoint belongs to model version {sidecar_model_version!r}; "
+                f"expected {MODEL_VERSION!r}. Restart the checkpoint."
+            )
+
+        variant = str(data["variant"][0])
+        has_state = parse_bool_value(data["has_state"][0], missing=False)
+        state = None
+        if has_state:
+            state = {
+                "variant": variant,
+                "mean_return": float(data["mean_return"][0]),
+            }
+            for key in ("mu", "phi", "sigma_eta", "nu", "rho", "h"):
+                if key in data.files:
+                    state[key] = np.asarray(data[key])
+        return (
+            state,
+            int(data["next_i"][0]),
+            int(data["active_block_start"][0]),
+            variant,
+        )
+
+
+def _resume_failed_refit_count(existing: pd.DataFrame) -> int:
+    """Count failed scheduled refits without ever using string truthiness."""
+    if "refit" not in existing:
+        return 0
+    refit_mask = parse_bool_series(existing["refit"], missing=False)
+    refit_rows = existing.loc[refit_mask]
+    if len(refit_rows) == 0 or "mcmc_converged" not in refit_rows:
+        return 0
+    converged = parse_bool_series(refit_rows["mcmc_converged"], missing=False)
+    return int((~converged).sum())
 
 
 def rolling_sv_var_es(
@@ -564,9 +609,7 @@ def rolling_sv_var_es(
                 raise RuntimeError("Checkpoint state belongs to a different SV variant")
             results = existing.to_dict("records")
             start_i = len(existing)
-            refit_rows = existing[existing.get("refit", False).fillna(False).astype(bool)] if "refit" in existing else existing.iloc[0:0]
-            if len(refit_rows) and "mcmc_converged" in refit_rows:
-                n_failed_refits = int((~refit_rows["mcmc_converged"].fillna(False).astype(bool)).sum())
+            n_failed_refits = _resume_failed_refit_count(existing)
 
     for i in range(start_i, n_forecasts):
         actual_return = ret_array[i + window]
