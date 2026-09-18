@@ -1,9 +1,6 @@
 name: sv-v5-retained-convergence-diagnostic
 
 on:
-  pull_request:
-    paths:
-      - '.github/workflows/sv-v3-diagnostic.yml'
   workflow_dispatch:
 
 permissions:
