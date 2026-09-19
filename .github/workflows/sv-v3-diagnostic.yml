@@ -1,6 +1,9 @@
-name: sv-v5-retained-convergence-diagnostic
+name: sv-v5-unresolved-convergence-diagnostic
 
 on:
+  pull_request:
+    paths:
+      - '.github/run-v5-unresolved'
   workflow_dispatch:
 
 permissions:
@@ -9,28 +12,19 @@ permissions:
 jobs:
   diagnose:
     runs-on: ubuntu-24.04
-    timeout-minutes: 180
+    timeout-minutes: 360
     strategy:
       fail-fast: false
       max-parallel: 3
       matrix:
         include:
           - commodity: cocoa
-            variant: SV-Gaussian
-            block: 24
-          - commodity: cocoa
             variant: SV-t
             block: 0
           - commodity: gold
             variant: SV-Gaussian
             block: 0
           - commodity: gold
-            variant: SV-t
-            block: 0
-          - commodity: oil
-            variant: SV-Gaussian
-            block: 0
-          - commodity: oil
             variant: SV-t
             block: 0
     steps:
@@ -41,7 +35,7 @@ jobs:
           cache: pip
       - run: python -m pip install --upgrade pip
       - run: pip install -r requirements.txt
-      - name: Run retained production-scale SV diagnostic
+      - name: Run unresolved production-scale SV diagnostic
         run: >-
           python scripts/diagnose_sv_refit.py
           --commodity "${{ matrix.commodity }}"
@@ -54,7 +48,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: sv-v5-${{ matrix.commodity }}-${{ matrix.variant }}-block-${{ matrix.block }}
+          name: sv-v5-unresolved-${{ matrix.commodity }}-${{ matrix.variant }}-block-${{ matrix.block }}
           path: diagnostics/
           if-no-files-found: warn
           retention-days: 30
