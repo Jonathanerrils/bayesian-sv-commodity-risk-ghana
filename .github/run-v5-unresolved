@@ -1,1 +1,2 @@
 Trigger unresolved v5 retained-SV diagnostics with extended timeout.
+Retest unresolved cases at target_accept=0.99.
