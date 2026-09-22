@@ -36,6 +36,7 @@ def main() -> None:
     parser.add_argument("--block", type=int, required=True)
     parser.add_argument("--window", type=int, default=1000)
     parser.add_argument("--refit-every", type=int, default=42)
+    parser.add_argument("--target-accept", type=float, default=0.95)
     parser.add_argument("--output-dir", type=Path, default=PROJECT_ROOT / "diagnostics")
     args = parser.parse_args()
 
@@ -48,6 +49,7 @@ def main() -> None:
     fit = fit_sv_adaptive(
         train,
         variant=args.variant,
+        target_accept=args.target_accept,
         random_seed=42 + start_i,
         attempts=DEFAULT_ROLLING_MCMC_ATTEMPTS,
     )
@@ -60,6 +62,7 @@ def main() -> None:
         "window": args.window,
         "refit_every": args.refit_every,
         "model_version": MODEL_VERSION,
+        "target_accept": args.target_accept,
         "converged": bool(fit.get("converged", False)),
         "accepted_attempt": fit.get("accepted_attempt"),
         "max_rhat": fit.get("max_rhat"),
