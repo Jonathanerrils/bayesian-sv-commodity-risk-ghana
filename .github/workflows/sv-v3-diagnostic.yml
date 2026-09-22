@@ -43,6 +43,7 @@ jobs:
           --block "${{ matrix.block }}"
           --window 1000
           --refit-every 42
+          --target-accept 0.99
           --output-dir diagnostics
       - name: Upload diagnostics
         if: always()
