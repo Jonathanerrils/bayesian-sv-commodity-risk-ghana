@@ -122,3 +122,34 @@ def test_symmetric_return_likelihood_does_not_depend_on_future_volatility_shock(
     )
     loglik = _observation_loglik(transition, actual_return=-0.03)
     assert np.allclose(loglik, loglik[0])
+
+def test_particle_ancestry_is_resampled_with_state():
+    state = base_state(n=50)
+    state["particle_id"] = np.arange(50, dtype=np.int64)
+    transition = _transition_filter_state(state, np.random.default_rng(123))
+
+    updated, _ = update_filter_state(
+        transition, actual_return=-0.08, rng=np.random.default_rng(456)
+    )
+
+    assert "particle_id" in updated
+    assert len(updated["particle_id"]) == len(state["particle_id"])
+    assert set(np.unique(updated["particle_id"])).issubset(
+        set(state["particle_id"])
+    )
+
+
+def test_particle_unique_fraction_cannot_increase_after_resampling():
+    state = base_state(n=100)
+    state["particle_id"] = np.arange(100, dtype=np.int64)
+    transition = _transition_filter_state(state, np.random.default_rng(7))
+
+    updated, _ = update_filter_state(
+        transition, actual_return=-0.15, rng=np.random.default_rng(8)
+    )
+
+    before = np.unique(state["particle_id"]).size / len(state["particle_id"])
+    after = np.unique(updated["particle_id"]).size / len(updated["particle_id"])
+    assert after <= before
+    assert 0.0 < after <= 1.0
+
