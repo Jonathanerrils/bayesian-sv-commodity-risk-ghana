@@ -357,22 +357,44 @@ def forecast_sv_var_es(fit_result: dict,
         n_samples = len(mu_post)
         rng = np.random.default_rng(42)
 
+        # One-step-ahead volatility innovation. For leverage variants this
+        # same shock must enter both the state and return equations.
+        eta_next = rng.normal(size=n_samples)
+
         # One-step-ahead h forecast for each posterior draw
         h_next = (mu_post
                   + phi_post * (h_last - mu_post)
-                  + sigma_post * rng.normal(size=n_samples))
+                  + sigma_post * eta_next)
+
+        is_t = variant in ("SV-t", "SV-t-Leverage")
+        has_leverage = variant in ("SV-Leverage", "SV-t-Leverage")
+
+        if has_leverage:
+            rho_post = trace.posterior["rho"].values.flatten()
+            return_mu = rho_post * np.exp(h_next / 2) * eta_next
+            return_scale = (
+                np.sqrt(np.clip(1 - rho_post**2, 1e-6, 1.0))
+                * np.exp(h_next / 2)
+            )
+        else:
+            return_mu = np.zeros(n_samples)
+            return_scale = np.exp(h_next / 2)
 
         # One-step-ahead return forecast
-        if variant in ("SV-t", "SV-t-Leverage"):
+        if is_t:
             nu_post = trace.posterior["nu"].values.flatten()
-            # Student-t: r = scale * t_nu
             from scipy.stats import t as t_dist
             r_pred = np.array([
-                t_dist.rvs(df=nu_post[i], scale=np.exp(h_next[i]/2), random_state=rng)
+                t_dist.rvs(
+                    df=nu_post[i],
+                    loc=return_mu[i],
+                    scale=return_scale[i],
+                    random_state=rng,
+                )
                 for i in range(n_samples)
             ]) + mu_ret
         else:
-            r_pred = rng.normal(0, np.exp(h_next/2)) + mu_ret
+            r_pred = rng.normal(return_mu, return_scale) + mu_ret
 
         # VaR and ES from predictive distribution
         var_threshold = -np.quantile(r_pred, alpha)
