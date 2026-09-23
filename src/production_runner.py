@@ -88,21 +88,48 @@ def setup_logging(log_path: Path) -> logging.Logger:
 # -----------------------------------------------------------------------
 # CHECKPOINT HELPERS
 # -----------------------------------------------------------------------
-def checkpoint_path(commodity: str, model: str) -> Path:
+def legacy_checkpoint_path(commodity: str, model: str) -> Path:
+    """Return the pre-configuration checkpoint path used by published runs."""
     return CHECKPOINT_DIR / f"{commodity}_{model.replace(' ', '_')}.csv"
 
 
-def checkpoint_exists(commodity: str, model: str) -> bool:
-    return checkpoint_path(commodity, model).exists()
+def checkpoint_path(commodity: str, model: str, window: int,
+                    refit_every: int | None = None) -> Path:
+    """Return a checkpoint path that uniquely identifies the run configuration."""
+    safe_model = model.replace(" ", "_")
+    parts = [commodity, safe_model, f"w{window}"]
+    if refit_every is not None:
+        parts.append(f"refit{refit_every}")
+    return CHECKPOINT_DIR / ("_".join(parts) + ".csv")
 
 
-def load_checkpoint(commodity: str, model: str) -> pd.DataFrame:
-    return pd.read_csv(checkpoint_path(commodity, model),
-                       parse_dates=["date"], index_col="date")
+def existing_checkpoint_path(commodity: str, model: str, window: int,
+                             refit_every: int | None = None) -> Path | None:
+    """Find a compatible checkpoint without mixing different configurations."""
+    configured = checkpoint_path(commodity, model, window, refit_every)
+    if configured.exists():
+        return configured
+
+    # Backward compatibility is deliberately restricted to the historical
+    # primary specification. Non-default robustness runs must never reuse
+    # the old untagged W=1000 / refit=42 checkpoints.
+    legacy_allowed = (
+        window == WINDOW
+        and (refit_every is None or refit_every == REFIT_EVERY)
+    )
+    legacy = legacy_checkpoint_path(commodity, model)
+    if legacy_allowed and legacy.exists():
+        return legacy
+
+    return None
 
 
-def save_checkpoint(df: pd.DataFrame, commodity: str, model: str):
-    df.to_csv(checkpoint_path(commodity, model))
+def load_checkpoint(path: Path) -> pd.DataFrame:
+    return pd.read_csv(path, parse_dates=["date"], index_col="date")
+
+
+def save_checkpoint(df: pd.DataFrame, path: Path):
+    df.to_csv(path)
 
 
 # -----------------------------------------------------------------------
@@ -110,23 +137,25 @@ def save_checkpoint(df: pd.DataFrame, commodity: str, model: str):
 # -----------------------------------------------------------------------
 def run_benchmark(commodity: str, model: str,
                   returns: pd.Series, prices: pd.Series,
-                  logger: logging.Logger) -> pd.DataFrame:
+                  logger: logging.Logger, window: int) -> pd.DataFrame:
 
-    if checkpoint_exists(commodity, model):
-        logger.info(f"  [SKIP] {commodity}/{model}: checkpoint found, loading")
-        return load_checkpoint(commodity, model)
+    existing_path = existing_checkpoint_path(commodity, model, window)
+    if existing_path is not None:
+        logger.info(f"  [SKIP] {commodity}/{model}: compatible checkpoint "
+                    f"found ({existing_path.name}), loading")
+        return load_checkpoint(existing_path)
 
-    logger.info(f"  [START] {commodity}/{model}")
+    logger.info(f"  [START] {commodity}/{model} (window={window})")
     t0 = time.time()
 
     if model == "GARCH":
-        df = rolling_var_es(returns, "GARCH", window=WINDOW, alphas=ALPHAS)
+        df = rolling_var_es(returns, "GARCH", window=window, alphas=ALPHAS)
     elif model == "EGARCH":
-        df = rolling_var_es(returns, "EGARCH", window=WINDOW, alphas=ALPHAS)
+        df = rolling_var_es(returns, "EGARCH", window=window, alphas=ALPHAS)
     elif model == "HistSim":
-        df = historical_simulation_var_es(returns, window=WINDOW, alphas=ALPHAS)
+        df = historical_simulation_var_es(returns, window=window, alphas=ALPHAS)
     elif model == "OU":
-        df = rolling_ou_var_es(prices, returns, window=WINDOW,
+        df = rolling_ou_var_es(prices, returns, window=window,
                                alphas=ALPHAS)
     else:
         raise ValueError(f"Unknown benchmark model: {model}")
@@ -134,7 +163,7 @@ def run_benchmark(commodity: str, model: str,
     elapsed = time.time() - t0
     logger.info(f"  [DONE] {commodity}/{model}: "
                 f"{len(df)} forecasts in {elapsed/60:.1f} min")
-    save_checkpoint(df, commodity, model)
+    save_checkpoint(df, checkpoint_path(commodity, model, window))
     return df
 
 
@@ -143,31 +172,40 @@ def run_benchmark(commodity: str, model: str,
 # -----------------------------------------------------------------------
 def run_sv(commodity: str, variant: str,
            returns: pd.Series,
-           logger: logging.Logger) -> pd.DataFrame:
+           logger: logging.Logger, window: int,
+           refit_every: int = REFIT_EVERY) -> pd.DataFrame:
 
-    ckpt_path = checkpoint_path(commodity, variant)
-    expected_steps = len(returns) - WINDOW
+    configured_path = checkpoint_path(commodity, variant, window, refit_every)
+    existing_path = existing_checkpoint_path(
+        commodity, variant, window, refit_every
+    )
+    ckpt_path = existing_path if existing_path is not None else configured_path
+    expected_steps = len(returns) - window
 
-    if ckpt_path.exists():
+    if existing_path is not None:
         try:
-            existing = pd.read_csv(ckpt_path, parse_dates=["date"])
+            existing = pd.read_csv(existing_path, parse_dates=["date"])
             if len(existing) >= expected_steps:
                 logger.info(f"  [SKIP] {commodity}/{variant}: complete "
-                           f"checkpoint found ({len(existing)} steps), loading")
-                return load_checkpoint(commodity, variant)
+                           f"compatible checkpoint found ({len(existing)} steps, "
+                           f"{existing_path.name}), loading")
+                return load_checkpoint(existing_path)
             else:
                 logger.info(f"  [RESUME] {commodity}/{variant}: partial "
-                           f"checkpoint found ({len(existing)}/{expected_steps} "
-                           f"steps) -- resuming rather than restarting")
+                           f"compatible checkpoint found "
+                           f"({len(existing)}/{expected_steps} steps, "
+                           f"{existing_path.name}) -- resuming")
         except Exception:
             logger.warning(f"  [WARN] {commodity}/{variant}: existing "
                           f"checkpoint unreadable, starting fresh")
+            ckpt_path = configured_path
 
-    logger.info(f"  [START] {commodity}/{variant}")
+    logger.info(f"  [START] {commodity}/{variant} "
+                f"(window={window}, refit_every={refit_every})")
     t0 = time.time()
 
-    df = rolling_sv_var_es(returns, variant=variant, window=WINDOW,
-                           refit_every=REFIT_EVERY, alphas=ALPHAS,
+    df = rolling_sv_var_es(returns, variant=variant, window=window,
+                           refit_every=refit_every, alphas=ALPHAS,
                            checkpoint_path=ckpt_path, checkpoint_every=50)
 
     elapsed = time.time() - t0
@@ -278,7 +316,8 @@ def main():
         if run_benchmarks:
             for model in BENCHMARK_MODELS:
                 try:
-                    fc = run_benchmark(commodity, model, ret, prices, logger)
+                    fc = run_benchmark(commodity, model, ret, prices, logger,
+                                       window=window)
                     all_forecasts[(commodity, model)] = fc
                 except Exception as e:
                     logger.error(f"  [FAILED] {commodity}/{model}: {e}")
@@ -287,7 +326,8 @@ def main():
         if run_sv_models:
             for variant in SV_VARIANTS:
                 try:
-                    fc = run_sv(commodity, variant, ret, logger)
+                    fc = run_sv(commodity, variant, ret, logger,
+                                window=window, refit_every=REFIT_EVERY)
                     all_forecasts[(commodity, variant)] = fc
                 except Exception as e:
                     logger.error(f"  [FAILED] {commodity}/{variant}: {e}")
