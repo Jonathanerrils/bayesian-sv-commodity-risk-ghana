@@ -29,6 +29,100 @@ def _jsonable(value):
     return value
 
 
+
+def _distribution_summary(values: np.ndarray) -> dict:
+    values = np.asarray(values, dtype=float)
+    values = values[np.isfinite(values)]
+    if values.size == 0:
+        return {"n": 0}
+    q05, q50, q95 = np.quantile(values, [0.05, 0.50, 0.95])
+    return {
+        "n": int(values.size),
+        "mean": float(values.mean()),
+        "median": float(q50),
+        "q05": float(q05),
+        "q95": float(q95),
+        "min": float(values.min()),
+        "max": float(values.max()),
+    }
+
+
+def _divergence_geometry(fit: dict) -> dict:
+    """Summarize where NUTS divergences occur without altering the fit."""
+    trace = fit.get("trace")
+    if trace is None or "diverging" not in trace.sample_stats:
+        return {
+            "available": False,
+            "n_divergent": 0,
+            "n_total": 0,
+            "divergence_rate": None,
+            "metrics": {},
+        }
+
+    divergent = np.asarray(trace.sample_stats["diverging"].values, dtype=bool)
+    if divergent.ndim != 2:
+        raise ValueError("expected diverging sample-stat array with chain x draw dimensions")
+    nondivergent = ~divergent
+
+    metrics = {}
+
+    def add_metric(name: str, values) -> None:
+        arr = np.asarray(values, dtype=float)
+        if arr.shape[:2] != divergent.shape:
+            return
+        if arr.ndim > 2:
+            return
+        metrics[name] = {
+            "divergent": _distribution_summary(arr[divergent]),
+            "nondivergent": _distribution_summary(arr[nondivergent]),
+        }
+
+    for name in (
+        "mu",
+        "phi",
+        "phi_raw",
+        "sigma_eta",
+        "nu",
+        "nu_minus_two",
+        "h0_std",
+    ):
+        if name in trace.posterior:
+            add_metric(name, trace.posterior[name].values)
+
+    if "eta" in trace.posterior:
+        eta = np.asarray(trace.posterior["eta"].values, dtype=float)
+        if eta.shape[:2] == divergent.shape and eta.ndim >= 3:
+            reduce_axes = tuple(range(2, eta.ndim))
+            add_metric("eta_max_abs", np.max(np.abs(eta), axis=reduce_axes))
+            add_metric("eta_rms", np.sqrt(np.mean(eta**2, axis=reduce_axes)))
+
+    if "h" in trace.posterior:
+        h = np.asarray(trace.posterior["h"].values, dtype=float)
+        if h.shape[:2] == divergent.shape and h.ndim >= 3:
+            reduce_axes = tuple(range(2, h.ndim))
+            add_metric("h_min", np.min(h, axis=reduce_axes))
+            add_metric("h_max", np.max(h, axis=reduce_axes))
+            add_metric(
+                "h_range",
+                np.max(h, axis=reduce_axes) - np.min(h, axis=reduce_axes),
+            )
+            add_metric("h_last", h[..., -1])
+
+    for name in ("energy_error", "max_energy_error", "tree_depth", "step_size"):
+        if name in trace.sample_stats:
+            add_metric(name, trace.sample_stats[name].values)
+
+    n_total = int(divergent.size)
+    n_divergent = int(divergent.sum())
+    return {
+        "available": True,
+        "n_divergent": n_divergent,
+        "n_total": n_total,
+        "divergence_rate": float(n_divergent / n_total) if n_total else None,
+        "metrics": metrics,
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--commodity", choices=COMMODITIES, required=True)
@@ -71,6 +165,7 @@ def main() -> None:
         "rhat_by_var": fit.get("rhat_by_var", {}),
         "ess_by_var": fit.get("ess_by_var", {}),
         "attempts": fit.get("mcmc_attempts", []),
+        "divergence_geometry": _divergence_geometry(fit),
         "error": fit.get("error"),
     }
 
