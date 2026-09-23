@@ -1,0 +1,31 @@
+name: Branch tests
+
+on:
+  push:
+    branches:
+      - fix/window-config-checkpoints
+      - fix/leverage-forecast-rho
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: python -m pip install --upgrade pip && python -m pip install -r requirements.txt
+
+      - name: Run branch-specific tests
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF_NAME" == "fix/window-config-checkpoints" ]]; then
+            python -m unittest discover -s tests -p "test_production_runner.py"
+          elif [[ "$GITHUB_REF_NAME" == "fix/leverage-forecast-rho" ]]; then
+            python -m unittest discover -s tests -p "test_sv_forecast.py"
+          fi
