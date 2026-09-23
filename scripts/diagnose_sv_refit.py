@@ -37,6 +37,25 @@ def main() -> None:
     parser.add_argument("--window", type=int, default=1000)
     parser.add_argument("--refit-every", type=int, default=42)
     parser.add_argument("--target-accept", type=float, default=0.95)
+    parser.add_argument(
+        "--attempt",
+        type=int,
+        default=None,
+        help=(
+            "Run one numbered entry from DEFAULT_ROLLING_MCMC_ATTEMPTS instead "
+            "of the full adaptive escalation. The attempt keeps the same seed "
+            "it would have received inside fit_sv_adaptive."
+        ),
+    )
+    parser.add_argument(
+        "--allow-nonconverged",
+        action="store_true",
+        help=(
+            "Write diagnostics and exit successfully even when this individual "
+            "attempt does not converge. Intended for split-attempt CI where a "
+            "separate summary job enforces the unchanged convergence gate."
+        ),
+    )
     parser.add_argument("--output-dir", type=Path, default=PROJECT_ROOT / "diagnostics")
     args = parser.parse_args()
 
@@ -46,13 +65,41 @@ def main() -> None:
         raise ValueError("requested block does not have a complete fitting window")
 
     train = returns[start_i : start_i + args.window]
-    fit = fit_sv_adaptive(
-        train,
-        variant=args.variant,
-        target_accept=args.target_accept,
-        random_seed=42 + start_i,
-        attempts=DEFAULT_ROLLING_MCMC_ATTEMPTS,
-    )
+    base_seed = 42 + start_i
+
+    if args.attempt is None:
+        fit = fit_sv_adaptive(
+            train,
+            variant=args.variant,
+            target_accept=args.target_accept,
+            random_seed=base_seed,
+            attempts=DEFAULT_ROLLING_MCMC_ATTEMPTS,
+        )
+        requested_attempt = None
+    else:
+        if args.attempt < 1 or args.attempt > len(DEFAULT_ROLLING_MCMC_ATTEMPTS):
+            raise ValueError(
+                f"--attempt must be between 1 and {len(DEFAULT_ROLLING_MCMC_ATTEMPTS)}"
+            )
+        requested_attempt = int(args.attempt)
+        config = DEFAULT_ROLLING_MCMC_ATTEMPTS[requested_attempt - 1]
+        fit = fit_sv_adaptive(
+            train,
+            variant=args.variant,
+            target_accept=args.target_accept,
+            random_seed=base_seed + requested_attempt - 1,
+            attempts=[config],
+        )
+        # A one-entry adaptive call labels its local attempt as 1. Remap the
+        # diagnostic metadata to the production escalation number so split jobs
+        # can be recombined without ambiguity.
+        attempts = []
+        for record in fit.get("mcmc_attempts", []):
+            record = dict(record)
+            record["attempt"] = requested_attempt
+            attempts.append(record)
+        fit["mcmc_attempts"] = attempts
+        fit["accepted_attempt"] = requested_attempt if fit.get("converged", False) else None
 
     payload = {
         "commodity": args.commodity,
@@ -63,6 +110,7 @@ def main() -> None:
         "refit_every": args.refit_every,
         "model_version": MODEL_VERSION,
         "target_accept": args.target_accept,
+        "requested_attempt": requested_attempt,
         "converged": bool(fit.get("converged", False)),
         "accepted_attempt": fit.get("accepted_attempt"),
         "max_rhat": fit.get("max_rhat"),
@@ -76,11 +124,15 @@ def main() -> None:
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     slug = args.variant.lower().replace(" ", "-")
-    path = args.output_dir / f"sv_refit__{args.commodity}__{slug}__block-{args.block}.json"
+    attempt_suffix = "" if requested_attempt is None else f"__attempt-{requested_attempt}"
+    path = (
+        args.output_dir
+        / f"sv_refit__{args.commodity}__{slug}__block-{args.block}{attempt_suffix}.json"
+    )
     path.write_text(json.dumps(_jsonable(payload), indent=2), encoding="utf-8")
     print(json.dumps(_jsonable(payload), indent=2))
 
-    if not payload["converged"]:
+    if not payload["converged"] and not args.allow_nonconverged:
         raise SystemExit(1)
 
 
