@@ -361,6 +361,9 @@ def initialize_filter_state(fit_result: dict) -> dict:
         "sigma_eta": trace.posterior["sigma_eta"].values.reshape(-1).astype(float),
         "h": trace.posterior["h"].values[:, :, -1].reshape(-1).astype(float),
     }
+    # Track ancestry of posterior particles within a refit block. This is
+    # diagnostic-only: it does not enter forecasting or likelihood evaluation.
+    state["particle_id"] = np.arange(len(state["h"]), dtype=np.int64)
     if "nu" in trace.posterior:
         state["nu"] = trace.posterior["nu"].values.reshape(-1).astype(float)
     if "rho" in trace.posterior:
@@ -448,7 +451,7 @@ def update_filter_state(transition: dict, actual_return: float, rng: np.random.G
         "variant": transition["variant"],
         "mean_return": transition["mean_return"],
     }
-    for key in ("mu", "phi", "sigma_eta", "nu", "rho"):
+    for key in ("mu", "phi", "sigma_eta", "nu", "rho", "particle_id"):
         if key in transition:
             new_state[key] = transition[key][idx]
     new_state["h"] = transition["h_next"][idx]
@@ -497,7 +500,7 @@ def _save_filter_state(
     }
     if state is not None:
         arrays["mean_return"] = np.array([state["mean_return"]], dtype=float)
-        for key in ("mu", "phi", "sigma_eta", "nu", "rho", "h"):
+        for key in ("mu", "phi", "sigma_eta", "nu", "rho", "h", "particle_id"):
             if key in state:
                 arrays[key] = np.asarray(state[key])
     np.savez_compressed(path, **arrays)
@@ -532,7 +535,7 @@ def _load_filter_state(path: Path) -> tuple[dict | None, int, int, str]:
                 "variant": variant,
                 "mean_return": float(data["mean_return"][0]),
             }
-            for key in ("mu", "phi", "sigma_eta", "nu", "rho", "h"):
+            for key in ("mu", "phi", "sigma_eta", "nu", "rho", "h", "particle_id"):
                 if key in data.files:
                     state[key] = np.asarray(data[key])
         return (
@@ -648,6 +651,7 @@ def rolling_sv_var_es(
         if filter_state is None:
             row["estimation_failed"] = True
             row["filter_ess"] = np.nan
+            row["particle_unique_fraction"] = np.nan
             for alpha in alphas:
                 row[f"var_{alpha}"] = np.nan
                 row[f"es_{alpha}"] = np.nan
@@ -663,6 +667,15 @@ def rolling_sv_var_es(
                 transition, actual_return, step_rng
             )
             row["filter_ess"] = filter_ess
+            if "particle_id" in filter_state:
+                row["particle_unique_fraction"] = float(
+                    np.unique(filter_state["particle_id"]).size
+                    / len(filter_state["particle_id"])
+                )
+            else:
+                # Older sidecars may predate ancestry tracking. Do not invent
+                # ancestry on resume; record the diagnostic as unavailable.
+                row["particle_unique_fraction"] = np.nan
 
         results.append(row)
 
