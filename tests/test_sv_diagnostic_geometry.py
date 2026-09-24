@@ -7,7 +7,7 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from diagnose_sv_refit import _divergence_geometry
+from diagnose_sv_refit import _divergence_geometry, _resolve_attempt
 
 
 class _Values:
@@ -76,3 +76,21 @@ def test_divergence_geometry_handles_missing_trace():
     assert not result["available"]
     assert result["n_divergent"] == 0
     assert result["metrics"] == {}
+
+
+def test_split_attempt_seed_matches_production_escalation():
+    attempts1, seed1, requested1 = _resolve_attempt(1, 42)
+    attempts2, seed2, requested2 = _resolve_attempt(2, 42)
+
+    assert requested1 == 1
+    assert requested2 == 2
+    assert seed1 == 42
+    assert seed2 == 43
+    assert len(attempts1) == 1
+    assert len(attempts2) == 1
+    assert attempts1[0]["chains"] == 4
+    assert attempts1[0]["tune"] == 1000
+    assert attempts1[0]["draws"] == 1000
+    assert attempts2[0]["chains"] == 4
+    assert attempts2[0]["tune"] == 2000
+    assert attempts2[0]["draws"] == 2000
