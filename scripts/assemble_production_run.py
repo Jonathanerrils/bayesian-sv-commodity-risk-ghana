@@ -26,6 +26,7 @@ from production_runner import (
     BENCHMARK_MODELS,
     COMMODITIES,
     SV_VARIANTS,
+    DEFAULT_TARGET_ACCEPT,
     common_valid_dates,
     compile_results,
     run_key,
@@ -83,7 +84,10 @@ def _validate_forecast_state(merged: pd.DataFrame, label: str) -> tuple[pd.Serie
     return pd.Series(~failed & all_finite, index=merged.index), pd.Series(failed, index=merged.index)
 
 
-def assemble(input_dir: Path, window: int, refit_every: int, predictive_draws: int, output_dir: Path) -> dict:
+def assemble(
+    input_dir: Path, window: int, refit_every: int, predictive_draws: int,
+    output_dir: Path, target_accept: float = DEFAULT_TARGET_ACCEPT,
+) -> dict:
     returns_all = load_all_returns(verbose=False)
     csvs = _candidate_csvs(input_dir)
     if not csvs:
@@ -92,10 +96,13 @@ def assemble(input_dir: Path, window: int, refit_every: int, predictive_draws: i
     forecasts: dict[tuple[str, str], pd.DataFrame] = {}
     availability_rows: list[dict] = []
     diagnostics: dict = {
-        "run_key": run_key(window, refit_every, predictive_draws),
+        "run_key": run_key(
+            window, refit_every, predictive_draws, target_accept=target_accept
+        ),
         "window": window,
         "refit_every": refit_every,
         "predictive_draws": predictive_draws,
+        "target_accept": target_accept,
         "models_expected": ALL_MODELS,
         "commodities_expected": COMMODITIES,
         "inputs": [str(p) for p in csvs],
@@ -169,6 +176,17 @@ def assemble(input_dir: Path, window: int, refit_every: int, predictive_draws: i
             valid_mask, failed_mask = _validate_forecast_state(merged, f"{commodity}/{model}")
 
             if model in SV_VARIANTS:
+                if "target_accept" not in merged:
+                    raise RuntimeError(f"{commodity}/{model}: missing target_accept provenance")
+                observed_target = pd.to_numeric(merged["target_accept"], errors="coerce")
+                if observed_target.isna().any() or not np.allclose(
+                    observed_target.to_numpy(dtype=float), float(target_accept),
+                    rtol=0.0, atol=1e-12,
+                ):
+                    raise RuntimeError(
+                        f"{commodity}/{model}: target_accept provenance mismatch; "
+                        f"expected {target_accept}"
+                    )
                 if "refit" not in merged:
                     raise RuntimeError(f"{commodity}/{model}: missing refit column")
                 refit_flags = _bool_series(
@@ -272,6 +290,7 @@ def assemble(input_dir: Path, window: int, refit_every: int, predictive_draws: i
     primary = compile_results(
         forecasts, window=window, refit_every=refit_every,
         predictive_draws=predictive_draws, logger=logger,
+        target_accept=target_accept,
     )
 
     forecast_dir = output_dir / "forecasts"
@@ -294,10 +313,14 @@ def main() -> None:
     parser.add_argument("--window", type=int, default=1000)
     parser.add_argument("--refit-every", type=int, default=42)
     parser.add_argument("--predictive-draws", type=int, default=20_000)
+    parser.add_argument("--target-accept", type=float, default=DEFAULT_TARGET_ACCEPT)
     args = parser.parse_args()
+    if not (0.0 < args.target_accept < 1.0):
+        parser.error("--target-accept must lie strictly between 0 and 1")
     diagnostics = assemble(
         args.input_dir, args.window, args.refit_every,
         args.predictive_draws, args.output_dir,
+        target_accept=args.target_accept,
     )
     print(json.dumps({"status": diagnostics["status"], "run_key": diagnostics["run_key"]}, indent=2))
 
