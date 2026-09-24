@@ -30,6 +30,7 @@ from production_runner import (
     COMMODITIES,
     GARCH_BENCHMARK_SPECS,
     SV_VARIANTS,
+    DEFAULT_TARGET_ACCEPT,
 )
 from sv_model import (
     DEFAULT_ROLLING_MCMC_ATTEMPTS,
@@ -108,6 +109,7 @@ def _failed_block_rows(
     ret_array: np.ndarray,
     dates: pd.Index,
     fit: dict,
+    target_accept: float,
 ) -> list[dict]:
     """Represent a failed scheduled refit on every date in its forecast block."""
     attempts_json = json.dumps(fit.get("mcmc_attempts", []), default=str)
@@ -125,6 +127,7 @@ def _failed_block_rows(
             "commodity": commodity,
             "model": variant,
             "shard_kind": "sv",
+            "target_accept": target_accept,
             "mcmc_converged": False if first else np.nan,
             "mcmc_attempt": np.nan,
             "mcmc_max_rhat": fit.get("max_rhat", np.nan) if first else np.nan,
@@ -153,6 +156,7 @@ def run_sv_shard(
     predictive_draws: int,
     output_dir: Path,
     random_seed: int = DEFAULT_RANDOM_SEED,
+    target_accept: float = DEFAULT_TARGET_ACCEPT,
 ) -> Path:
     returns = load_all_returns(verbose=False)[commodity]
     ret_array = returns.to_numpy(dtype=float)
@@ -182,7 +186,7 @@ def run_sv_shard(
         fit = fit_sv_adaptive(
             train,
             variant=variant,
-            target_accept=0.95,
+            target_accept=target_accept,
             random_seed=random_seed + block_start,
             attempts=DEFAULT_ROLLING_MCMC_ATTEMPTS,
         )
@@ -192,6 +196,7 @@ def run_sv_shard(
                 "commodity": commodity,
                 "model": variant,
                 "block_id": block_id,
+                "target_accept": target_accept,
                 "global_start_i": block_start,
                 "forecast_date": str(dates[block_start + window]),
                 "max_rhat": fit.get("max_rhat"),
@@ -206,7 +211,7 @@ def run_sv_shard(
             rows.extend(
                 _failed_block_rows(
                     commodity, variant, block_id, block_start, block_end,
-                    window, ret_array, dates, fit,
+                    window, ret_array, dates, fit, target_accept,
                 )
             )
             pd.DataFrame(rows).to_csv(path, index=False)
@@ -236,6 +241,7 @@ def run_sv_shard(
                 "commodity": commodity,
                 "model": variant,
                 "shard_kind": "sv",
+                "target_accept": target_accept,
                 "mcmc_converged": True if first else np.nan,
                 "mcmc_attempt": fit.get("accepted_attempt", np.nan) if first else np.nan,
                 "mcmc_max_rhat": fit.get("max_rhat", np.nan) if first else np.nan,
@@ -273,8 +279,11 @@ def main() -> None:
     parser.add_argument("--window", type=int, default=DEFAULT_WINDOW)
     parser.add_argument("--refit-every", type=int, default=DEFAULT_REFIT_EVERY)
     parser.add_argument("--predictive-draws", type=int, default=DEFAULT_PREDICTIVE_DRAWS)
+    parser.add_argument("--target-accept", type=float, default=DEFAULT_TARGET_ACCEPT)
     parser.add_argument("--output-dir", type=Path, default=PROJECT_ROOT / "production_shards")
     args = parser.parse_args()
+    if not (0.0 < args.target_accept < 1.0):
+        parser.error("--target-accept must lie strictly between 0 and 1")
 
     if args.kind == "benchmark":
         if args.model not in BENCHMARK_MODELS:
@@ -286,6 +295,7 @@ def main() -> None:
         path = run_sv_shard(
             args.commodity, args.model, args.start_block, args.n_blocks,
             args.window, args.refit_every, args.predictive_draws, args.output_dir,
+            target_accept=args.target_accept,
         )
     print(f"Wrote production shard: {path}")
 
