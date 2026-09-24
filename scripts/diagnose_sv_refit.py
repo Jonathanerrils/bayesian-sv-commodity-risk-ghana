@@ -30,6 +30,21 @@ def _jsonable(value):
 
 
 
+
+def _resolve_attempt(attempt: int | None, base_seed: int):
+    """Return the production-equivalent attempt list and seed for one split run."""
+    if attempt is None:
+        return DEFAULT_ROLLING_MCMC_ATTEMPTS, int(base_seed), None
+    if attempt < 1 or attempt > len(DEFAULT_ROLLING_MCMC_ATTEMPTS):
+        raise ValueError(
+            f"attempt must be between 1 and {len(DEFAULT_ROLLING_MCMC_ATTEMPTS)}"
+        )
+    config = dict(DEFAULT_ROLLING_MCMC_ATTEMPTS[attempt - 1])
+    # fit_sv_adaptive numbers a supplied one-entry attempt list from 1, so shift
+    # the base seed here to match the seed used by the normal adaptive routine.
+    return [config], int(base_seed + attempt - 1), int(attempt)
+
+
 def _distribution_summary(values: np.ndarray) -> dict:
     values = np.asarray(values, dtype=float)
     values = values[np.isfinite(values)]
@@ -131,6 +146,17 @@ def main() -> None:
     parser.add_argument("--window", type=int, default=1000)
     parser.add_argument("--refit-every", type=int, default=42)
     parser.add_argument("--target-accept", type=float, default=0.95)
+    parser.add_argument(
+        "--attempt",
+        type=int,
+        default=None,
+        help="Run one numbered production escalation attempt instead of both.",
+    )
+    parser.add_argument(
+        "--allow-nonconverged",
+        action="store_true",
+        help="Persist diagnostics and exit successfully after a statistical failure.",
+    )
     parser.add_argument("--output-dir", type=Path, default=PROJECT_ROOT / "diagnostics")
     args = parser.parse_args()
 
@@ -140,13 +166,25 @@ def main() -> None:
         raise ValueError("requested block does not have a complete fitting window")
 
     train = returns[start_i : start_i + args.window]
+    base_seed = 42 + start_i
+    attempts, fit_seed, requested_attempt = _resolve_attempt(args.attempt, base_seed)
     fit = fit_sv_adaptive(
         train,
         variant=args.variant,
         target_accept=args.target_accept,
-        random_seed=42 + start_i,
-        attempts=DEFAULT_ROLLING_MCMC_ATTEMPTS,
+        random_seed=fit_seed,
+        attempts=attempts,
     )
+    if requested_attempt is not None:
+        records = []
+        for record in fit.get("mcmc_attempts", []):
+            record = dict(record)
+            record["attempt"] = requested_attempt
+            records.append(record)
+        fit["mcmc_attempts"] = records
+        fit["accepted_attempt"] = (
+            requested_attempt if fit.get("converged", False) else None
+        )
 
     payload = {
         "commodity": args.commodity,
@@ -157,6 +195,9 @@ def main() -> None:
         "refit_every": args.refit_every,
         "model_version": MODEL_VERSION,
         "target_accept": args.target_accept,
+        "requested_attempt": requested_attempt,
+        "production_base_seed": int(base_seed),
+        "fit_seed": int(fit_seed),
         "converged": bool(fit.get("converged", False)),
         "accepted_attempt": fit.get("accepted_attempt"),
         "max_rhat": fit.get("max_rhat"),
@@ -171,11 +212,15 @@ def main() -> None:
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     slug = args.variant.lower().replace(" ", "-")
-    path = args.output_dir / f"sv_refit__{args.commodity}__{slug}__block-{args.block}.json"
+    attempt_suffix = "" if requested_attempt is None else f"__attempt-{requested_attempt}"
+    path = (
+        args.output_dir
+        / f"sv_refit__{args.commodity}__{slug}__block-{args.block}{attempt_suffix}.json"
+    )
     path.write_text(json.dumps(_jsonable(payload), indent=2), encoding="utf-8")
     print(json.dumps(_jsonable(payload), indent=2))
 
-    if not payload["converged"]:
+    if not payload["converged"] and not args.allow_nonconverged:
         raise SystemExit(1)
 
 
