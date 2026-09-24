@@ -34,6 +34,7 @@ CHECKPOINT_ROOT = PROJECT_ROOT / "checkpoints" / "v2"
 PIPELINE_VERSION = "risk-pipeline-v5-primary-symmetric-sv-checkpoint-safe"
 ALPHAS = [0.01, 0.05]
 COMMODITIES = ["cocoa", "gold", "oil"]
+DEFAULT_TARGET_ACCEPT = 0.95
 SV_VARIANTS = list(PRIMARY_SV_VARIANTS)
 GARCH_BENCHMARK_SPECS = {
     "GARCH": ("GARCH", "normal"),
@@ -68,17 +69,32 @@ def mcmc_policy_label(attempts=None) -> str:
     )
 
 
-def run_key(window: int, refit_every: int, predictive_draws: int) -> str:
+def _target_accept_label(target_accept: float) -> str:
+    return f"{float(target_accept):.6g}".replace(".", "p")
+
+
+def run_key(
+    window: int,
+    refit_every: int,
+    predictive_draws: int,
+    target_accept: float = DEFAULT_TARGET_ACCEPT,
+) -> str:
     return (
         f"{PIPELINE_VERSION}_{MODEL_VERSION}_{OU_MODEL_VERSION}_"
-        f"{mcmc_policy_label()}_w{window}_r{refit_every}_p{predictive_draws}"
+        f"{mcmc_policy_label()}_w{window}_r{refit_every}_p{predictive_draws}_"
+        f"ta{_target_accept_label(target_accept)}"
         .replace("/", "-")
         .replace(" ", "-")
     )
 
 
-def checkpoint_path(commodity, model, window, refit_every, predictive_draws) -> Path:
-    root = CHECKPOINT_ROOT / run_key(window, refit_every, predictive_draws)
+def checkpoint_path(
+    commodity, model, window, refit_every, predictive_draws,
+    target_accept=DEFAULT_TARGET_ACCEPT,
+) -> Path:
+    root = CHECKPOINT_ROOT / run_key(
+        window, refit_every, predictive_draws, target_accept=target_accept
+    )
     root.mkdir(parents=True, exist_ok=True)
     return root / f"{commodity}_{model.replace(' ', '_')}.csv"
 
@@ -87,8 +103,13 @@ def load_checkpoint(path: Path) -> pd.DataFrame:
     return pd.read_csv(path, parse_dates=["date"], index_col="date")
 
 
-def run_benchmark(commodity, model, returns, prices, window, refit_every, predictive_draws, logger):
-    path = checkpoint_path(commodity, model, window, refit_every, predictive_draws)
+def run_benchmark(
+    commodity, model, returns, prices, window, refit_every, predictive_draws,
+    logger, target_accept=DEFAULT_TARGET_ACCEPT,
+):
+    path = checkpoint_path(
+        commodity, model, window, refit_every, predictive_draws, target_accept
+    )
     if path.exists():
         existing = load_checkpoint(path)
         if len(existing) == len(returns) - window:
@@ -114,10 +135,15 @@ def run_benchmark(commodity, model, returns, prices, window, refit_every, predic
     return df
 
 
-def run_sv(commodity, variant, returns, window, refit_every, predictive_draws, logger):
+def run_sv(
+    commodity, variant, returns, window, refit_every, predictive_draws,
+    logger, target_accept=DEFAULT_TARGET_ACCEPT,
+):
     if variant not in SV_VARIANTS:
         raise ValueError(f"{variant!r} is not in the frozen v5 primary SV family")
-    path = checkpoint_path(commodity, variant, window, refit_every, predictive_draws)
+    path = checkpoint_path(
+        commodity, variant, window, refit_every, predictive_draws, target_accept
+    )
     expected = len(returns) - window
     if path.exists():
         existing = load_checkpoint(path)
@@ -135,6 +161,7 @@ def run_sv(commodity, variant, returns, window, refit_every, predictive_draws, l
         checkpoint_path=path,
         checkpoint_every=50,
         n_predictive=predictive_draws,
+        target_accept=target_accept,
         mcmc_attempts=DEFAULT_ROLLING_MCMC_ATTEMPTS,
     )
     logger.info("[DONE] %s/%s: %d forecasts in %.1f min", commodity, variant, len(df), (time.time() - t0) / 60)
@@ -167,7 +194,10 @@ def common_valid_dates(forecasts: dict, commodity: str) -> pd.DatetimeIndex:
     return pd.DatetimeIndex(common).sort_values()
 
 
-def _backtest_rows(forecasts, window, refit_every, predictive_draws, common_dates):
+def _backtest_rows(
+    forecasts, window, refit_every, predictive_draws, common_dates,
+    target_accept=DEFAULT_TARGET_ACCEPT,
+):
     rows = []
     date_cache = {
         commodity: common_valid_dates(forecasts, commodity)
@@ -182,6 +212,7 @@ def _backtest_rows(forecasts, window, refit_every, predictive_draws, common_date
         bt["window"] = window
         bt["refit_every"] = refit_every if model in SV_VARIANTS else 1
         bt["predictive_draws"] = predictive_draws if model in SV_VARIANTS else 0
+        bt["target_accept"] = target_accept if model in SV_VARIANTS else np.nan
         bt["pipeline_version"] = PIPELINE_VERSION
         bt["model_version"] = MODEL_VERSION if model in SV_VARIANTS else "n/a"
         bt["ou_model_version"] = OU_MODEL_VERSION if model == "OU" else "n/a"
@@ -232,15 +263,26 @@ def _summary_table(results: pd.DataFrame, scheme: str = "raw") -> pd.DataFrame:
     return summary.reset_index()
 
 
-def compile_results(forecasts, window, refit_every, predictive_draws, logger) -> pd.DataFrame:
-    out_dir = TABLES_DIR / run_key(window, refit_every, predictive_draws)
+def compile_results(
+    forecasts, window, refit_every, predictive_draws, logger,
+    target_accept=DEFAULT_TARGET_ACCEPT,
+) -> pd.DataFrame:
+    out_dir = TABLES_DIR / run_key(
+        window, refit_every, predictive_draws, target_accept=target_accept
+    )
     out_dir.mkdir(parents=True, exist_ok=True)
 
     native = _add_dual_bonferroni(
-        _backtest_rows(forecasts, window, refit_every, predictive_draws, common_dates=False)
+        _backtest_rows(
+            forecasts, window, refit_every, predictive_draws,
+            common_dates=False, target_accept=target_accept,
+        )
     )
     primary = _add_dual_bonferroni(
-        _backtest_rows(forecasts, window, refit_every, predictive_draws, common_dates=True)
+        _backtest_rows(
+            forecasts, window, refit_every, predictive_draws,
+            common_dates=True, target_accept=target_accept,
+        )
     )
 
     primary.to_csv(out_dir / "full_backtest_results.csv", index=False)
@@ -284,6 +326,7 @@ def main():
     parser.add_argument("--window", type=int, default=1000)
     parser.add_argument("--refit-every", type=int, default=42)
     parser.add_argument("--predictive-draws", type=int, default=20_000)
+    parser.add_argument("--target-accept", type=float, default=DEFAULT_TARGET_ACCEPT)
     args = parser.parse_args()
 
     if args.sv_only and args.benchmark_only:
@@ -294,15 +337,17 @@ def main():
         parser.error("--refit-every must be >= 1")
     if args.predictive_draws < 2_000:
         parser.error("--predictive-draws must be >= 2000")
+    if not (0.0 < args.target_accept < 1.0):
+        parser.error("--target-accept must lie strictly between 0 and 1")
 
     commodities = COMMODITIES if args.commodity == "all" else [args.commodity]
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     log_path = RESULTS_DIR / f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
     logger = setup_logging(log_path)
     logger.info(
-        "Run config: commodities=%s window=%d refit=%d predictive=%d pipeline=%s sv=%s ou=%s",
+        "Run config: commodities=%s window=%d refit=%d predictive=%d target_accept=%.6g pipeline=%s sv=%s ou=%s",
         commodities, args.window, args.refit_every, args.predictive_draws,
-        PIPELINE_VERSION, MODEL_VERSION, OU_MODEL_VERSION,
+        args.target_accept, PIPELINE_VERSION, MODEL_VERSION, OU_MODEL_VERSION,
     )
     logger.info("Rolling MCMC policy: %s", mcmc_policy_label())
 
@@ -317,15 +362,20 @@ def main():
                 forecasts[(commodity, model)] = run_benchmark(
                     commodity, model, returns, prices,
                     args.window, args.refit_every, args.predictive_draws, logger,
+                    target_accept=args.target_accept,
                 )
         if not args.benchmark_only:
             for variant in SV_VARIANTS:
                 forecasts[(commodity, variant)] = run_sv(
                     commodity, variant, returns,
                     args.window, args.refit_every, args.predictive_draws, logger,
+                    target_accept=args.target_accept,
                 )
     if forecasts:
-        compile_results(forecasts, args.window, args.refit_every, args.predictive_draws, logger)
+        compile_results(
+            forecasts, args.window, args.refit_every, args.predictive_draws, logger,
+            target_accept=args.target_accept,
+        )
 
 
 if __name__ == "__main__":
