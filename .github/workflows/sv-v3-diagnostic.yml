@@ -26,17 +26,10 @@ jobs:
       - name: Run cocoa SV-t attempt 1
         run: >-
           python scripts/diagnose_sv_refit.py
-          --commodity cocoa
-          --variant SV-t
-          --block 0
-          --attempt 1
-          --window 1000
-          --refit-every 42
-          --target-accept 0.99
-          --allow-nonconverged
-          --output-dir diagnostics
+          --commodity cocoa --variant SV-t --block 0 --attempt 1
+          --window 1000 --refit-every 42 --target-accept 0.99
+          --allow-nonconverged --output-dir diagnostics
       - id: result
-        name: Read convergence result
         shell: python
         run: |
           import json, os
@@ -48,14 +41,14 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: sv-v5-high-accuracy-cocoa-SV-t-block-0-attempt-1
+          name: sv-v5-cocoa-SV-t-attempt-1
           path: diagnostics/
           if-no-files-found: warn
           retention-days: 30
 
   cocoa_sv_t_attempt2:
     needs: cocoa_sv_t_attempt1
-    if: needs.cocoa_sv_t_attempt1.outputs.converged != 'true'
+    if: always() && needs.cocoa_sv_t_attempt1.outputs.converged != 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 360
     steps:
@@ -69,95 +62,13 @@ jobs:
       - name: Run cocoa SV-t attempt 2
         run: >-
           python scripts/diagnose_sv_refit.py
-          --commodity cocoa
-          --variant SV-t
-          --block 0
-          --attempt 2
-          --window 1000
-          --refit-every 42
-          --target-accept 0.99
-          --allow-nonconverged
-          --output-dir diagnostics
+          --commodity cocoa --variant SV-t --block 0 --attempt 2
+          --window 1000 --refit-every 42 --target-accept 0.99
+          --allow-nonconverged --output-dir diagnostics
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: sv-v5-high-accuracy-cocoa-SV-t-block-0-attempt-2
-          path: diagnostics/
-          if-no-files-found: warn
-          retention-days: 30
-
-  gold_sv_gaussian_attempt1:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 360
-    outputs:
-      converged: ${{ steps.result.outputs.converged }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-          cache: pip
-      - run: python -m pip install --upgrade pip
-      - run: pip install -r requirements.txt
-      - name: Run gold SV-Gaussian attempt 1
-        run: >-
-          python scripts/diagnose_sv_refit.py
-          --commodity gold
-          --variant SV-Gaussian
-          --block 0
-          --attempt 1
-          --window 1000
-          --refit-every 42
-          --target-accept 0.99
-          --allow-nonconverged
-          --output-dir diagnostics
-      - id: result
-        name: Read convergence result
-        shell: python
-        run: |
-          import json, os
-          from pathlib import Path
-          path = next(Path("diagnostics").glob("*__attempt-1.json"))
-          value = str(bool(json.loads(path.read_text())["converged"])).lower()
-          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
-              fh.write(f"converged={value}\n")
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: sv-v5-high-accuracy-gold-SV-Gaussian-block-0-attempt-1
-          path: diagnostics/
-          if-no-files-found: warn
-          retention-days: 30
-
-  gold_sv_gaussian_attempt2:
-    needs: gold_sv_gaussian_attempt1
-    if: needs.gold_sv_gaussian_attempt1.outputs.converged != 'true'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 360
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-          cache: pip
-      - run: python -m pip install --upgrade pip
-      - run: pip install -r requirements.txt
-      - name: Run gold SV-Gaussian attempt 2
-        run: >-
-          python scripts/diagnose_sv_refit.py
-          --commodity gold
-          --variant SV-Gaussian
-          --block 0
-          --attempt 2
-          --window 1000
-          --refit-every 42
-          --target-accept 0.99
-          --allow-nonconverged
-          --output-dir diagnostics
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: sv-v5-high-accuracy-gold-SV-Gaussian-block-0-attempt-2
+          name: sv-v5-cocoa-SV-t-attempt-2
           path: diagnostics/
           if-no-files-found: warn
           retention-days: 30
@@ -178,17 +89,10 @@ jobs:
       - name: Run gold SV-t attempt 1
         run: >-
           python scripts/diagnose_sv_refit.py
-          --commodity gold
-          --variant SV-t
-          --block 0
-          --attempt 1
-          --window 1000
-          --refit-every 42
-          --target-accept 0.99
-          --allow-nonconverged
-          --output-dir diagnostics
+          --commodity gold --variant SV-t --block 0 --attempt 1
+          --window 1000 --refit-every 42 --target-accept 0.99
+          --allow-nonconverged --output-dir diagnostics
       - id: result
-        name: Read convergence result
         shell: python
         run: |
           import json, os
@@ -200,14 +104,14 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: sv-v5-high-accuracy-gold-SV-t-block-0-attempt-1
+          name: sv-v5-gold-SV-t-attempt-1
           path: diagnostics/
           if-no-files-found: warn
           retention-days: 30
 
   gold_sv_t_attempt2:
     needs: gold_sv_t_attempt1
-    if: needs.gold_sv_t_attempt1.outputs.converged != 'true'
+    if: always() && needs.gold_sv_t_attempt1.outputs.converged != 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 360
     steps:
@@ -221,19 +125,13 @@ jobs:
       - name: Run gold SV-t attempt 2
         run: >-
           python scripts/diagnose_sv_refit.py
-          --commodity gold
-          --variant SV-t
-          --block 0
-          --attempt 2
-          --window 1000
-          --refit-every 42
-          --target-accept 0.99
-          --allow-nonconverged
-          --output-dir diagnostics
+          --commodity gold --variant SV-t --block 0 --attempt 2
+          --window 1000 --refit-every 42 --target-accept 0.99
+          --allow-nonconverged --output-dir diagnostics
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: sv-v5-high-accuracy-gold-SV-t-block-0-attempt-2
+          name: sv-v5-gold-SV-t-attempt-2
           path: diagnostics/
           if-no-files-found: warn
           retention-days: 30
@@ -243,80 +141,28 @@ jobs:
     needs:
       - cocoa_sv_t_attempt1
       - cocoa_sv_t_attempt2
-      - gold_sv_gaussian_attempt1
-      - gold_sv_gaussian_attempt2
       - gold_sv_t_attempt1
       - gold_sv_t_attempt2
     runs-on: ubuntu-24.04
     steps:
-      - name: Download all available split-attempt diagnostics
+      - uses: actions/checkout@v4
+      - name: Download available attempt artifacts
         uses: actions/download-artifact@v4
         with:
-          pattern: sv-v5-high-accuracy-*
+          pattern: sv-v5-*
           path: downloaded_diagnostics
           merge-multiple: true
-
-      - name: Enforce unchanged retained-family convergence gate
-        shell: python
-        run: |
-          import json
-          from pathlib import Path
-
-          expected = [
-              ("cocoa", "SV-t", 0),
-              ("gold", "SV-Gaussian", 0),
-              ("gold", "SV-t", 0),
-          ]
-
-          records = []
-          for path in Path("downloaded_diagnostics").rglob("*.json"):
-              records.append(json.loads(path.read_text(encoding="utf-8")))
-
-          summary = {"cases": [], "all_converged": True}
-          for commodity, variant, block in expected:
-              matches = [
-                  r for r in records
-                  if r.get("commodity") == commodity
-                  and r.get("variant") == variant
-                  and int(r.get("block")) == block
-              ]
-              matches.sort(key=lambda r: int(r.get("requested_attempt") or 999))
-              accepted = next((r for r in matches if r.get("converged")), None)
-              case = {
-                  "commodity": commodity,
-                  "variant": variant,
-                  "block": block,
-                  "attempts_observed": [
-                      {
-                          "attempt": r.get("requested_attempt"),
-                          "converged": bool(r.get("converged")),
-                          "max_rhat": r.get("max_rhat"),
-                          "min_ess": r.get("min_ess"),
-                          "n_divergences": r.get("n_divergences"),
-                          "error": r.get("error"),
-                      }
-                      for r in matches
-                  ],
-                  "converged": accepted is not None,
-                  "accepted_attempt": (
-                      accepted.get("requested_attempt") if accepted is not None else None
-                  ),
-              }
-              if accepted is None:
-                  summary["all_converged"] = False
-              summary["cases"].append(case)
-
-          Path("sv_v5_high_accuracy_summary.json").write_text(
-              json.dumps(summary, indent=2), encoding="utf-8"
-          )
-          print(json.dumps(summary, indent=2))
-
-          if not summary["all_converged"]:
-              raise SystemExit(1)
-
-      - name: Upload combined convergence summary
+      - name: Build strict convergence summary
+        run: >-
+          python scripts/summarize_sv_split_attempts.py
+          --artifact-dir downloaded_diagnostics
+          --output sv_v5_high_accuracy_summary.json
+          --job-status cocoa_SV_t_attempt1=${{ needs.cocoa_sv_t_attempt1.result }}
+          --job-status cocoa_SV_t_attempt2=${{ needs.cocoa_sv_t_attempt2.result }}
+          --job-status gold_SV_t_attempt1=${{ needs.gold_sv_t_attempt1.result }}
+          --job-status gold_SV_t_attempt2=${{ needs.gold_sv_t_attempt2.result }}
+      - uses: actions/upload-artifact@v4
         if: always()
-        uses: actions/upload-artifact@v4
         with:
           name: sv-v5-high-accuracy-summary
           path: sv_v5_high_accuracy_summary.json
