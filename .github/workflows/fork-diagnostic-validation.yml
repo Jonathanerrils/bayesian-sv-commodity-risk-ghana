@@ -19,8 +19,20 @@ jobs:
       - run: python -m pip install --upgrade pip
       - run: pip install -r requirements.txt
       - name: Compile diagnostics
-        run: python -m py_compile scripts/diagnose_sv_refit.py scripts/summarize_sv_split_attempts.py scripts/diagnose_particle_diversity.py || true
+        shell: bash
+        run: |
+          files=(
+            scripts/diagnose_sv_refit.py
+            scripts/summarize_sv_split_attempts.py
+            scripts/diagnose_particle_diversity.py
+          )
+          for file in "${files[@]}"; do
+            if [[ -f "$file" ]]; then
+              python -m py_compile "$file"
+            fi
+          done
       - name: Run diagnostic tests
+        shell: bash
         run: |
           tests=()
           [[ -f tests/test_sv_diagnostic_geometry.py ]] && tests+=(tests/test_sv_diagnostic_geometry.py)
