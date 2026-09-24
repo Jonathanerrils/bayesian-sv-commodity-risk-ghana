@@ -8,6 +8,7 @@ from production_runner import (
     ALPHAS,
     BONFERRONI_FAMILY_SIZE,
     COMMODITIES,
+    DEFAULT_TARGET_ACCEPT,
     GLOBAL_PRIMARY_BONFERRONI_FAMILY_SIZE,
     OU_MODEL_VERSION,
     PER_TEST_BONFERRONI_FAMILY_SIZE,
@@ -17,14 +18,19 @@ from production_runner import (
 )
 
 
-def test_run_key_changes_with_window_and_refit_and_versions():
+def test_run_key_changes_with_window_refit_sampler_target_and_versions():
     a = run_key(1000, 42, 20000)
     b = run_key(750, 42, 20000)
     c = run_key(1000, 21, 20000)
+    d = run_key(1000, 42, 20000, target_accept=0.99)
     assert a != b
     assert a != c
+    assert a != d
     assert "w1000" in a
     assert "r42" in a
+    assert "ta0p95" in a
+    assert "ta0p99" in d
+    assert DEFAULT_TARGET_ACCEPT == 0.95
     assert PIPELINE_VERSION in a
     assert OU_MODEL_VERSION in a
     assert "pipeline-v5" in a
