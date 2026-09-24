@@ -1,0 +1,30 @@
+name: Fork diagnostic validation
+
+on:
+  push:
+    branches:
+      - fix/sv-diagnostic-attempt-budget
+      - audit/sv-divergence-geometry
+      - audit/track-sv-particle-diversity
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install --upgrade pip
+      - run: pip install -r requirements.txt
+      - name: Compile diagnostics
+        run: python -m py_compile scripts/diagnose_sv_refit.py scripts/summarize_sv_split_attempts.py scripts/diagnose_particle_diversity.py || true
+      - name: Run diagnostic tests
+        run: |
+          tests=()
+          [[ -f tests/test_sv_diagnostic_geometry.py ]] && tests+=(tests/test_sv_diagnostic_geometry.py)
+          [[ -f tests/test_sv_split_summary.py ]] && tests+=(tests/test_sv_split_summary.py)
+          [[ -f tests/test_particle_diversity_diagnostic.py ]] && tests+=(tests/test_particle_diversity_diagnostic.py)
+          [[ -f tests/test_sv_filter.py ]] && tests+=(tests/test_sv_filter.py)
+          python -m pytest -q "${tests[@]}"
