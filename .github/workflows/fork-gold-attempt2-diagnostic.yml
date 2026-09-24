@@ -1,0 +1,64 @@
+name: fork-gold-sv-t-attempt2-diagnostic
+
+on:
+  push:
+    branches:
+      - fix/sv-diagnostic-attempt-budget
+    paths:
+      - ".github/workflows/fork-gold-attempt2-diagnostic.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  gold_sv_t_attempt2_diagnostic:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: python -m pip install --upgrade pip
+      - run: pip install -r requirements.txt
+      - name: Run Gold SV-t production-equivalent attempt 2
+        run: >-
+          python scripts/diagnose_sv_refit.py
+          --commodity gold
+          --variant SV-t
+          --block 0
+          --attempt 2
+          --window 1000
+          --refit-every 42
+          --target-accept 0.99
+          --allow-nonconverged
+          --output-dir diagnostics
+      - name: Show diagnostic summary
+        if: always()
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          path = Path("diagnostics/sv_refit__gold__sv-t__block-0__attempt-2.json")
+          if not path.exists():
+              raise SystemExit("diagnostic artifact missing: infrastructure failure")
+          p = json.loads(path.read_text())
+          print(json.dumps({
+              "converged": p["converged"],
+              "fit_seed": p["fit_seed"],
+              "max_rhat": p["max_rhat"],
+              "min_ess": p["min_ess"],
+              "n_divergences": p["n_divergences"],
+              "geometry_available": p["divergence_geometry"]["available"],
+          }, indent=2))
+          PY
+      - name: Upload Gold attempt 2 diagnostic
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gold-sv-t-attempt-2-geometry
+          path: diagnostics/
+          if-no-files-found: error
+          retention-days: 30
