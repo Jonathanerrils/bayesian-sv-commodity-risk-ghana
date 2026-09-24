@@ -1,9 +1,6 @@
 name: sv-v5-high-accuracy-convergence-diagnostic
 
 on:
-  pull_request:
-    paths:
-      - '.github/run-v5-high-accuracy'
   workflow_dispatch:
 
 permissions:
