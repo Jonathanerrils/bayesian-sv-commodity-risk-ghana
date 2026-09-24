@@ -1,9 +1,6 @@
 name: sv-v5-divergence-geometry-comparison
 
 on:
-  pull_request:
-    paths:
-      - '.github/run-v5-geometry-comparison'
   workflow_dispatch:
 
 permissions:
