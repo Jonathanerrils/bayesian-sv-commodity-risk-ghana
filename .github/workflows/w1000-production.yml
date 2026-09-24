@@ -18,6 +18,10 @@ on:
         description: Posterior predictive draws per forecast day
         required: true
         default: "20000"
+      target_accept:
+        description: NUTS target acceptance probability
+        required: true
+        default: "0.95"
       blocks_per_shard:
         description: Number of complete 42-day SV refit blocks per job
         required: true
@@ -36,6 +40,7 @@ env:
   WINDOW: ${{ inputs.window || '1000' }}
   REFIT_EVERY: ${{ inputs.refit_every || '42' }}
   PREDICTIVE_DRAWS: ${{ inputs.predictive_draws || '20000' }}
+  TARGET_ACCEPT: ${{ inputs.target_accept || '0.95' }}
   BLOCKS_PER_SHARD: ${{ inputs.blocks_per_shard || '4' }}
   PYTHONUNBUFFERED: "1"
 
@@ -140,6 +145,8 @@ jobs:
             --window "$WINDOW" \
             --refit-every "$REFIT_EVERY" \
             --predictive-draws "$PREDICTIVE_DRAWS" \
+            --target-accept "$TARGET_ACCEPT" \
+            --target-accept "$TARGET_ACCEPT" \
             --output-dir production_shards
       - uses: actions/upload-artifact@v4
         if: always()
@@ -177,6 +184,7 @@ jobs:
             --window "$WINDOW" \
             --refit-every "$REFIT_EVERY" \
             --predictive-draws "$PREDICTIVE_DRAWS" \
+            --target-accept "$TARGET_ACCEPT" \
             --output-dir production_shards
       - uses: actions/upload-artifact@v4
         if: always()
@@ -214,6 +222,7 @@ jobs:
             --window "$WINDOW" \
             --refit-every "$REFIT_EVERY" \
             --predictive-draws "$PREDICTIVE_DRAWS" \
+            --target-accept "$TARGET_ACCEPT" \
             --output-dir production_shards
       - uses: actions/upload-artifact@v4
         if: always()
