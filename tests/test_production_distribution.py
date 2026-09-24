@@ -48,3 +48,54 @@ def test_assembler_refuses_empty_input(tmp_path):
             predictive_draws=20_000,
             output_dir=tmp_path / "out",
         )
+
+
+def test_assembler_rejects_mismatched_sv_target_accept(tmp_path, monkeypatch):
+    import numpy as np
+    import pandas as pd
+    import scripts.assemble_production_run as assembly
+
+    dates = pd.date_range("2026-01-01", periods=6, freq="B")
+    returns = pd.Series(np.linspace(-0.02, 0.02, len(dates)), index=dates)
+    monkeypatch.setattr(
+        assembly,
+        "load_all_returns",
+        lambda verbose=False: {commodity: returns for commodity in COMMODITIES},
+    )
+    monkeypatch.setattr(assembly, "ALL_MODELS", ["SV-Gaussian"])
+    monkeypatch.setattr(assembly, "BENCHMARK_MODELS", [])
+    monkeypatch.setattr(assembly, "SV_VARIANTS", ["SV-Gaussian"])
+
+    shard = pd.DataFrame({
+        "date": dates[4:],
+        "actual_return": returns.iloc[4:].to_numpy(),
+        "global_i": [0, 1],
+        "commodity": ["cocoa", "cocoa"],
+        "model": ["SV-Gaussian", "SV-Gaussian"],
+        "estimation_failed": [False, False],
+        "refit": [True, False],
+        "block_id": [0, 0],
+        "target_accept": [0.95, 0.95],
+        "mcmc_converged": [True, np.nan],
+        "mcmc_attempt": [1, np.nan],
+        "mcmc_max_rhat": [1.005, np.nan],
+        "mcmc_min_ess": [600.0, np.nan],
+        "mcmc_divergences": [0, np.nan],
+        "filter_ess": [500.0, 450.0],
+        "var_0.01": [0.03, 0.03],
+        "es_0.01": [0.04, 0.04],
+        "var_0.05": [0.02, 0.02],
+        "es_0.05": [0.03, 0.03],
+    })
+    path = tmp_path / "sv__cocoa__sv-gaussian__blocks-0000-0000.csv"
+    shard.to_csv(path, index=False)
+
+    with pytest.raises(RuntimeError, match="target_accept provenance mismatch"):
+        assemble(
+            input_dir=tmp_path,
+            window=4,
+            refit_every=42,
+            predictive_draws=20_000,
+            output_dir=tmp_path / "out",
+            target_accept=0.99,
+        )
