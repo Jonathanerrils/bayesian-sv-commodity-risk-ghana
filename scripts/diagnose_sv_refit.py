@@ -30,6 +30,22 @@ def _jsonable(value):
 
 
 
+
+def _resolve_attempt(attempt: int | None, base_seed: int):
+    """Return production-equivalent attempt config and seed for split CI."""
+    if attempt is None:
+        return DEFAULT_ROLLING_MCMC_ATTEMPTS, int(base_seed), None
+    if attempt < 1 or attempt > len(DEFAULT_ROLLING_MCMC_ATTEMPTS):
+        raise ValueError(
+            f"attempt must be between 1 and {len(DEFAULT_ROLLING_MCMC_ATTEMPTS)}"
+        )
+    return (
+        [dict(DEFAULT_ROLLING_MCMC_ATTEMPTS[attempt - 1])],
+        int(base_seed + attempt - 1),
+        int(attempt),
+    )
+
+
 def _distribution_summary(values: np.ndarray) -> dict:
     values = np.asarray(values, dtype=float)
     values = values[np.isfinite(values)]
@@ -147,39 +163,27 @@ def main() -> None:
     train = returns[start_i : start_i + args.window]
     base_seed = 42 + start_i
 
-    if args.attempt is None:
-        fit = fit_sv_adaptive(
-            train,
-            variant=args.variant,
-            target_accept=args.target_accept,
-            random_seed=base_seed,
-            attempts=DEFAULT_ROLLING_MCMC_ATTEMPTS,
-        )
-        requested_attempt = None
-    else:
-        if args.attempt < 1 or args.attempt > len(DEFAULT_ROLLING_MCMC_ATTEMPTS):
-            raise ValueError(
-                f"--attempt must be between 1 and {len(DEFAULT_ROLLING_MCMC_ATTEMPTS)}"
-            )
-        requested_attempt = int(args.attempt)
-        config = DEFAULT_ROLLING_MCMC_ATTEMPTS[requested_attempt - 1]
-        fit = fit_sv_adaptive(
-            train,
-            variant=args.variant,
-            target_accept=args.target_accept,
-            random_seed=base_seed + requested_attempt - 1,
-            attempts=[config],
-        )
+    attempts, fit_seed, requested_attempt = _resolve_attempt(args.attempt, base_seed)
+    fit = fit_sv_adaptive(
+        train,
+        variant=args.variant,
+        target_accept=args.target_accept,
+        random_seed=fit_seed,
+        attempts=attempts,
+    )
+    if requested_attempt is not None:
         # A one-entry adaptive call labels its local attempt as 1. Remap the
         # diagnostic metadata to the production escalation number so split jobs
         # can be recombined without ambiguity.
-        attempts = []
+        records = []
         for record in fit.get("mcmc_attempts", []):
             record = dict(record)
             record["attempt"] = requested_attempt
-            attempts.append(record)
-        fit["mcmc_attempts"] = attempts
-        fit["accepted_attempt"] = requested_attempt if fit.get("converged", False) else None
+            records.append(record)
+        fit["mcmc_attempts"] = records
+        fit["accepted_attempt"] = (
+            requested_attempt if fit.get("converged", False) else None
+        )
 
     payload = {
         "commodity": args.commodity,
@@ -192,7 +196,7 @@ def main() -> None:
         "target_accept": args.target_accept,
         "requested_attempt": requested_attempt,
         "production_base_seed": int(base_seed),
-        "fit_seed": int(base_seed if requested_attempt is None else base_seed + requested_attempt - 1),
+        "fit_seed": int(fit_seed),
         "converged": bool(fit.get("converged", False)),
         "accepted_attempt": fit.get("accepted_attempt"),
         "max_rhat": fit.get("max_rhat"),
