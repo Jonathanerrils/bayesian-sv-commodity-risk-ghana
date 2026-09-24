@@ -1,6 +1,9 @@
-name: sv-v5-high-accuracy-convergence-diagnostic
+name: sv-v5-divergence-geometry-comparison
 
 on:
+  pull_request:
+    paths:
+      - '.github/run-v5-geometry-comparison'
   workflow_dispatch:
 
 permissions:
@@ -12,18 +15,17 @@ jobs:
     timeout-minutes: 360
     strategy:
       fail-fast: false
-      max-parallel: 3
+      max-parallel: 2
       matrix:
         include:
           - commodity: cocoa
             variant: SV-t
             block: 0
-          - commodity: gold
-            variant: SV-Gaussian
-            block: 0
-          - commodity: gold
+            attempt: 2
+          - commodity: oil
             variant: SV-t
             block: 0
+            attempt: 1
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -32,21 +34,22 @@ jobs:
           cache: pip
       - run: python -m pip install --upgrade pip
       - run: pip install -r requirements.txt
-      - name: Run unresolved production-scale SV diagnostic
+      - name: Run geometry diagnostic
         run: >-
           python scripts/diagnose_sv_refit.py
           --commodity "${{ matrix.commodity }}"
           --variant "${{ matrix.variant }}"
           --block "${{ matrix.block }}"
+          --attempt "${{ matrix.attempt }}"
           --window 1000
           --refit-every 42
           --target-accept 0.99
+          --allow-nonconverged
           --output-dir diagnostics
-      - name: Upload diagnostics
+      - uses: actions/upload-artifact@v4
         if: always()
-        uses: actions/upload-artifact@v4
         with:
-          name: sv-v5-high-accuracy-${{ matrix.commodity }}-${{ matrix.variant }}-block-${{ matrix.block }}
+          name: sv-v5-geometry-${{ matrix.commodity }}-${{ matrix.variant }}-attempt-${{ matrix.attempt }}
           path: diagnostics/
-          if-no-files-found: warn
+          if-no-files-found: error
           retention-days: 30
