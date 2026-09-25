@@ -1,5 +1,8 @@
 # Validity Repair v2 — Re-run Protocol
 
+> **Status: historical / superseded.** This document records the earlier v2 repair design and is retained for auditability. It is **not** the controlling primary-analysis specification. The frozen production design is now `docs/primary_analysis_spec_v5.md`, which limits the primary SV family to `SV-Gaussian` and `SV-t`; leverage variants are diagnostic/sensitivity models only. Where this document conflicts with v5, the v5 specification governs.
+
+
 ## Status
 
 The July 2026 rolling checkpoints, backtest tables, figures, and manuscript results are **legacy/provisional**. They remain in the repository for auditability but must not be used as confirmed empirical results.
