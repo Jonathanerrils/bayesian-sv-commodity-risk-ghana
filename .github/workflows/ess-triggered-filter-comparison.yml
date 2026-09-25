@@ -1,6 +1,9 @@
 name: ess-triggered-filter-comparison
 
 on:
+  pull_request:
+    paths:
+      - '.github/run-ess-filter-comparison'
   workflow_dispatch:
 
 permissions:
