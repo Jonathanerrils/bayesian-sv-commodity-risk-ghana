@@ -100,6 +100,7 @@ def _divergence_geometry(fit: dict) -> dict:
         "nu",
         "nu_minus_two",
         "h0_std",
+        "h0",
     ):
         if name in trace.posterior:
             add_metric(name, trace.posterior[name].values)

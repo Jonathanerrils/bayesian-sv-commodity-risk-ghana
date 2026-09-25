@@ -51,7 +51,7 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 RHAT_THRESHOLD = 1.01
 MIN_STRUCTURAL_ESS = 400
 FAST_MIN_ESS = 200
-MODEL_VERSION = "sv-filter-v4-primary-symmetric-noncentered"
+MODEL_VERSION = "sv-filter-exp-stationary-h0-centered"
 DEFAULT_ROLLING_MCMC_ATTEMPTS = (
     {"chains": 4, "tune": 1_000, "draws": 1_000},
     {"chains": 4, "tune": 2_000, "draws": 2_000},
@@ -79,11 +79,15 @@ def _np_unit_variance_t_scale(nu):
 
 
 def _noncentered_state_path(mu, phi, sigma_eta, T: int):
-    """Construct h_0,...,h_T from independent standard-normal innovations."""
-    h0_std = pm.Normal("h0_std", mu=0.0, sigma=1.0)
+    """Construct h_0,...,h_T with a directly sampled stationary initial state.
+
+    This experiment preserves the same stationary Normal law for h0 while
+    changing only the parameterization seen by NUTS. The innovation path eta
+    remains non-centered.
+    """
     eta = pm.Normal("eta", mu=0.0, sigma=1.0, shape=T)
     stationary_sd = sigma_eta / pt.sqrt(pt.clip(1.0 - phi**2, 1e-8, np.inf))
-    h0 = mu + stationary_sd * h0_std
+    h0 = pm.Normal("h0", mu=mu, sigma=stationary_sd)
 
     def step(eta_t, h_prev, mu_, phi_, sigma_):
         return mu_ + phi_ * (h_prev - mu_) + sigma_ * eta_t

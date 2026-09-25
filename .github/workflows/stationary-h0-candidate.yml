@@ -1,0 +1,66 @@
+name: stationary-h0-candidate-diagnostic
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  synthetic:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: python -m pip install --upgrade pip
+      - run: pip install -r requirements.txt
+      - name: High-persistence synthetic recovery
+        run: python scripts/diagnose_sv_stationary_h0_candidate.py --window 1000 --target-accept 0.99 --output-dir diagnostics
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: stationary-h0-synthetic
+          path: diagnostics/
+          if-no-files-found: error
+          retention-days: 30
+
+  real:
+    needs: synthetic
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        commodity: [cocoa, gold, oil]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: python -m pip install --upgrade pip
+      - run: pip install -r requirements.txt
+      - name: Retained SV-t attempt 1
+        run: >-
+          python scripts/diagnose_sv_refit.py
+          --commodity "${{ matrix.commodity }}"
+          --variant SV-t
+          --block 0
+          --attempt 1
+          --window 1000
+          --refit-every 42
+          --target-accept 0.99
+          --allow-nonconverged
+          --output-dir diagnostics
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: stationary-h0-${{ matrix.commodity }}-sv-t-attempt1
+          path: diagnostics/
+          if-no-files-found: error
+          retention-days: 30
