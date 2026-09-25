@@ -1,6 +1,9 @@
 name: stationary-h0-candidate-diagnostic
 
 on:
+  pull_request:
+    paths:
+      - '.github/run-stationary-h0-candidate'
   workflow_dispatch:
 
 permissions:
