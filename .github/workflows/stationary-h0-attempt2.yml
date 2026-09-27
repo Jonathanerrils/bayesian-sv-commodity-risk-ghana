@@ -1,9 +1,6 @@
 name: stationary-h0-attempt2-check
 
 on:
-  pull_request:
-    paths:
-      - '.github/run-stationary-h0-attempt2'
   workflow_dispatch:
 
 permissions:
