@@ -97,6 +97,7 @@ def _divergence_geometry(fit: dict) -> dict:
         "phi",
         "phi_raw",
         "sigma_eta",
+        "stationary_sd",
         "nu",
         "nu_minus_two",
         "h0_std",
