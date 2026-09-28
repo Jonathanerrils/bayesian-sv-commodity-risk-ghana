@@ -1,9 +1,6 @@
 name: ess-filter-threshold-validation
 
 on:
-  pull_request:
-    paths:
-      - '.github/run-ess-filter-thresholds'
   workflow_dispatch:
 
 permissions:
