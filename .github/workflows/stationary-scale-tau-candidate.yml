@@ -1,9 +1,6 @@
 name: stationary-scale-tau-candidate
 
 on:
-  pull_request:
-    paths:
-      - '.github/run-stationary-scale-tau'
   workflow_dispatch:
 
 permissions:
