@@ -1,9 +1,6 @@
 name: variant-specific-sv-production-candidate
 
 on:
-  pull_request:
-    paths:
-      - '.github/run-variant-specific-sv-validation'
   workflow_dispatch:
 
 permissions:
