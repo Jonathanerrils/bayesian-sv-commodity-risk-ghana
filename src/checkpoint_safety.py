@@ -11,7 +11,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-SV_CHECKPOINT_SCHEMA_VERSION = 2
+SV_CHECKPOINT_SCHEMA_VERSION = 3
 
 _TRUE_STRINGS = frozenset({"true", "1", "yes", "y", "t"})
 _FALSE_STRINGS = frozenset({"false", "0", "no", "n", "f", ""})
