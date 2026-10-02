@@ -51,7 +51,7 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 RHAT_THRESHOLD = 1.01
 MIN_STRUCTURAL_ESS = 400
 FAST_MIN_ESS = 200
-MODEL_VERSION = "sv-filter-v4-primary-symmetric-noncentered"
+MODEL_VERSION = "sv-filter-exp-ess-triggered-resampling"
 DEFAULT_ROLLING_MCMC_ATTEMPTS = (
     {"chains": 4, "tune": 1_000, "draws": 1_000},
     {"chains": 4, "tune": 2_000, "draws": 2_000},
@@ -361,6 +361,9 @@ def initialize_filter_state(fit_result: dict) -> dict:
         "sigma_eta": trace.posterior["sigma_eta"].values.reshape(-1).astype(float),
         "h": trace.posterior["h"].values[:, :, -1].reshape(-1).astype(float),
     }
+    n_particles = len(state["h"])
+    state["weights"] = np.full(n_particles, 1.0 / n_particles, dtype=float)
+    state["particle_id"] = np.arange(n_particles, dtype=np.int64)
     if "nu" in trace.posterior:
         state["nu"] = trace.posterior["nu"].values.reshape(-1).astype(float)
     if "rho" in trace.posterior:
@@ -385,7 +388,12 @@ def _transition_filter_state(state: dict, rng: np.random.Generator) -> dict:
 def _predictive_returns(transition: dict, n_predictive: int, rng: np.random.Generator) -> np.ndarray:
     """Draw r_t from h_t jointly with proposed eta_t for diagnostic leverage."""
     n_particles = len(transition["h"])
-    idx = rng.integers(0, n_particles, size=int(n_predictive))
+    weights = np.asarray(
+        transition.get("weights", np.full(n_particles, 1.0 / n_particles)),
+        dtype=float,
+    )
+    weights = weights / weights.sum()
+    idx = rng.choice(n_particles, size=int(n_predictive), replace=True, p=weights)
     h = transition["h"][idx]
     eta = transition["eta"][idx]
     vol = np.exp(h / 2.0)
@@ -424,34 +432,73 @@ def _observation_loglik(transition: dict, actual_return: float) -> np.ndarray:
     return stats.norm.logpdf(x, loc=loc, scale=np.maximum(base_scale, 1e-12))
 
 
-def update_filter_state(transition: dict, actual_return: float, rng: np.random.Generator) -> tuple[dict, float]:
-    """Condition on r_t, resample, and advance particles from h_t to h_{t+1}."""
+def update_filter_state(
+    transition: dict,
+    actual_return: float,
+    rng: np.random.Generator,
+    resample_threshold: float = 0.5,
+) -> tuple[dict, float]:
+    """Sequentially reweight particles and resample only when ESS is low."""
     if "h_next" not in transition:
         raise ValueError("transition is missing h_next; call _transition_filter_state first")
-    logw = _observation_loglik(transition, actual_return)
-    finite = np.isfinite(logw)
-    if not finite.any():
-        weights = np.full(len(logw), 1.0 / len(logw))
+    if not (0.0 < resample_threshold <= 1.0):
+        raise ValueError("resample_threshold must lie in (0, 1]")
+
+    n_particles = len(transition["h"])
+    prior_weights = np.asarray(
+        transition.get("weights", np.full(n_particles, 1.0 / n_particles)),
+        dtype=float,
+    )
+    prior_total = prior_weights.sum()
+    if (
+        prior_weights.shape != (n_particles,)
+        or not np.isfinite(prior_weights).all()
+        or prior_total <= 0.0
+    ):
+        prior_weights = np.full(n_particles, 1.0 / n_particles)
     else:
-        floor = np.nanmax(logw[finite]) - 1_000.0
-        logw = np.where(finite, logw, floor)
+        prior_weights = prior_weights / prior_total
+
+    loglik = _observation_loglik(transition, actual_return)
+    finite = np.isfinite(loglik)
+    if not finite.any():
+        posterior_weights = prior_weights.copy()
+    else:
+        floor = np.nanmax(loglik[finite]) - 1_000.0
+        loglik = np.where(finite, loglik, floor)
+        logw = np.log(np.maximum(prior_weights, np.finfo(float).tiny)) + loglik
         logw -= np.max(logw)
-        weights = np.exp(logw)
-        total = weights.sum()
+        posterior_weights = np.exp(logw)
+        total = posterior_weights.sum()
         if not np.isfinite(total) or total <= 0.0:
-            weights = np.full(len(logw), 1.0 / len(logw))
+            posterior_weights = np.full(n_particles, 1.0 / n_particles)
         else:
-            weights /= total
-    filter_ess = float(1.0 / np.sum(weights**2))
-    idx = rng.choice(len(weights), size=len(weights), replace=True, p=weights)
+            posterior_weights /= total
+
+    filter_ess = float(1.0 / np.sum(posterior_weights**2))
+    should_resample = filter_ess < float(resample_threshold) * n_particles
+
     new_state = {
         "variant": transition["variant"],
         "mean_return": transition["mean_return"],
     }
-    for key in ("mu", "phi", "sigma_eta", "nu", "rho"):
-        if key in transition:
-            new_state[key] = transition[key][idx]
-    new_state["h"] = transition["h_next"][idx]
+    keys = ("mu", "phi", "sigma_eta", "nu", "rho", "particle_id")
+    if should_resample:
+        idx = rng.choice(
+            n_particles, size=n_particles, replace=True, p=posterior_weights
+        )
+        for key in keys:
+            if key in transition:
+                new_state[key] = transition[key][idx]
+        new_state["h"] = transition["h_next"][idx]
+        new_state["weights"] = np.full(n_particles, 1.0 / n_particles)
+    else:
+        for key in keys:
+            if key in transition:
+                new_state[key] = np.asarray(transition[key]).copy()
+        new_state["h"] = np.asarray(transition["h_next"]).copy()
+        new_state["weights"] = posterior_weights
+    new_state["resampled"] = bool(should_resample)
     return new_state, filter_ess
 
 
@@ -497,7 +544,7 @@ def _save_filter_state(
     }
     if state is not None:
         arrays["mean_return"] = np.array([state["mean_return"]], dtype=float)
-        for key in ("mu", "phi", "sigma_eta", "nu", "rho", "h"):
+        for key in ("mu", "phi", "sigma_eta", "nu", "rho", "h", "weights", "particle_id"):
             if key in state:
                 arrays[key] = np.asarray(state[key])
     np.savez_compressed(path, **arrays)
@@ -532,7 +579,7 @@ def _load_filter_state(path: Path) -> tuple[dict | None, int, int, str]:
                 "variant": variant,
                 "mean_return": float(data["mean_return"][0]),
             }
-            for key in ("mu", "phi", "sigma_eta", "nu", "rho", "h"):
+            for key in ("mu", "phi", "sigma_eta", "nu", "rho", "h", "weights", "particle_id"):
                 if key in data.files:
                     state[key] = np.asarray(data[key])
         return (
@@ -663,6 +710,10 @@ def rolling_sv_var_es(
                 transition, actual_return, step_rng
             )
             row["filter_ess"] = filter_ess
+            row["filter_resampled"] = bool(filter_state.get("resampled", False))
+            row["particle_unique_fraction"] = float(
+                np.unique(filter_state["particle_id"]).size / len(filter_state["particle_id"])
+            )
 
         results.append(row)
 

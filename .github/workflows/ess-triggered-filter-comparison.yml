@@ -1,0 +1,48 @@
+name: ess-triggered-filter-comparison
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  compare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include:
+          - commodity: cocoa
+            variant: SV-Gaussian
+          - commodity: oil
+            variant: SV-t
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: python -m pip install --upgrade pip
+      - run: pip install -r requirements.txt
+      - name: Compare resampling policies
+        run: >-
+          python scripts/compare_sv_filter_resampling.py
+          --commodity "${{ matrix.commodity }}"
+          --variant "${{ matrix.variant }}"
+          --window 1000
+          --block 0
+          --refit-every 42
+          --target-accept 0.99
+          --resample-threshold 0.5
+          --predictive-draws 20000
+          --output-dir diagnostics
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: filter-comparison-${{ matrix.commodity }}-${{ matrix.variant }}
+          path: diagnostics/
+          if-no-files-found: error
+          retention-days: 30
