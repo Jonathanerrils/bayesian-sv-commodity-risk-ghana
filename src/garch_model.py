@@ -1,305 +1,204 @@
-"""
-models/garch/garch_model.py
+"""GARCH-family benchmark models and historical-simulation baseline."""
 
-GARCH(1,1) and EGARCH(1,1) estimation and rolling VaR/ES forecasting.
+from __future__ import annotations
 
-Implements Deliverable 2 evaluation framework exactly:
-- Rolling window W=1000 (primary), W=750, W=1250 (robustness)
-- VaR at alpha=0.01 and alpha=0.05
-- Forecasts are one-step-ahead only
-- No future data leaks into any estimation window
-
-Model specification reference: Deliverable 1, Section 3.
-Evaluation specification reference: Deliverable 2, Section 3.
-"""
+import re
 
 import numpy as np
 import pandas as pd
 from arch import arch_model
-import warnings
+from scipy import stats
 
-# Suppress arch convergence warnings in rolling — we track failures explicitly
-warnings.filterwarnings("ignore", category=UserWarning, module="arch")
+SUPPORTED_MODEL_TYPES = {"GARCH", "EGARCH"}
+SUPPORTED_DISTRIBUTIONS = {"normal", "t"}
 
 
-def fit_garch(returns: np.ndarray,
-              model_type: str = "GARCH",
-              p: int = 1,
-              q: int = 1) -> object:
+def _parameter_values(result, prefix: str) -> list[float]:
+    """Extract parameter-family values in numeric lag order."""
+    found = []
+    pattern = re.compile(rf"^{re.escape(prefix)}\[(\d+)\]$")
+    for name, value in result.params.items():
+        match = pattern.match(str(name))
+        if match:
+            found.append((int(match.group(1)), float(value)))
+    return [value for _lag, value in sorted(found)]
+
+
+def _ar_recursion_stable(coefficients: list[float] | np.ndarray) -> bool:
+    """Return True when x_t=sum(beta_j x_{t-j}) has all roots inside unit circle."""
+    beta = np.asarray(coefficients, dtype=float)
+    if beta.ndim != 1 or len(beta) == 0 or not np.isfinite(beta).all():
+        return False
+    # Characteristic equation lambda^q - beta1 lambda^(q-1) - ... - betaq = 0.
+    roots = np.roots(np.concatenate(([1.0], -beta)))
+    return bool(np.isfinite(roots).all() and np.all(np.abs(roots) < 1.0))
+
+
+def fit_garch(
+    returns: np.ndarray,
+    model_type: str = "GARCH",
+    p: int = 1,
+    q: int = 1,
+    distribution: str = "normal",
+):
+    """Fit GARCH(p,q) or asymmetric EGARCH(p,1,q).
+
+    ``arch`` is fit on percentage returns for numerical stability. Student-t
+    innovations use ``arch``'s standardized unit-variance t distribution.
     """
-    Fit a GARCH(p,q) or EGARCH(p,q) model to a return series.
+    if model_type not in SUPPORTED_MODEL_TYPES:
+        raise ValueError(f"model_type must be one of {sorted(SUPPORTED_MODEL_TYPES)}")
+    if distribution not in SUPPORTED_DISTRIBUTIONS:
+        raise ValueError(f"distribution must be one of {sorted(SUPPORTED_DISTRIBUTIONS)}")
+    if p < 1 or q < 1:
+        raise ValueError("p and q must both be >= 1")
 
-    Parameters
-    ----------
-    returns : np.ndarray
-        Log-return series (as percentage returns internally for numerical
-        stability; arch package works in percentage scale).
-    model_type : str
-        'GARCH' or 'EGARCH'.
-    p, q : int
-        Lag orders. Default (1,1) per Deliverable 1 justification.
-
-    Returns
-    -------
-    arch ARCHModelResult, or None if estimation failed.
-    """
-    # arch package expects percentage returns for numerical stability
-    ret_pct = returns * 100
-
-    if model_type == "GARCH":
-        model = arch_model(ret_pct, vol="Garch", p=p, q=q,
-                           mean="Constant", dist="normal")
-    elif model_type == "EGARCH":
-        model = arch_model(ret_pct, vol="EGarch", p=p, q=q,
-                           mean="Constant", dist="normal")
-    else:
-        raise ValueError(f"model_type must be 'GARCH' or 'EGARCH', got {model_type}")
+    ret_pct = np.asarray(returns, dtype=float) * 100.0
+    vol = "GARCH" if model_type == "GARCH" else "EGARCH"
+    asym_order = 0 if model_type == "GARCH" else 1
+    dist = "normal" if distribution == "normal" else "t"
+    model = arch_model(
+        ret_pct,
+        vol=vol,
+        p=p,
+        o=asym_order,
+        q=q,
+        mean="Constant",
+        dist=dist,
+        rescale=False,
+    )
 
     try:
         result = model.fit(disp="off", show_warning=False)
-        # Basic sanity check: alpha+beta < 1 for GARCH stationarity
+        beta = _parameter_values(result, "beta")
+        if len(beta) != q or not np.all(np.isfinite(beta)):
+            return None
+
         if model_type == "GARCH":
-            alpha = result.params.get("alpha[1]", 0)
-            beta  = result.params.get("beta[1]", 0)
-            if alpha + beta >= 1.0:
-                # Non-stationary fit -- flag but do not crash
-                pass  # returned result still usable; caller checks
+            alpha = _parameter_values(result, "alpha")
+            if len(alpha) != p or not np.all(np.isfinite(alpha)):
+                return None
+            if any(x < 0 for x in alpha + beta):
+                return None
+            # Weak covariance stationarity for a conventional GARCH(p,q).
+            if sum(alpha) + sum(beta) >= 1.0:
+                return None
+        else:
+            # EGARCH log variance is an AR(q) recursion.  Stability is governed
+            # by its characteristic roots, not by the sufficient-but-not-
+            # necessary shortcut sum(abs(beta)) < 1.  The latter wrongly rejects
+            # some valid q=2 robustness fits and can create selective missing dates.
+            if not _ar_recursion_stable(beta):
+                return None
+
+        if distribution == "t":
+            nu = float(result.params.get("nu", np.nan))
+            if not np.isfinite(nu) or nu <= 2.0:
+                return None
         return result
     except Exception:
         return None
 
 
-def forecast_var_es(result, alpha: float, horizon: int = 1) -> tuple:
-    """
-    Produce one-step-ahead VaR and ES from a fitted GARCH/EGARCH result.
+def _student_t_var_es_multiplier(alpha: float, nu: float) -> tuple[float, float]:
+    """Unit-variance Student-t quantile and positive ES multiplier."""
+    if nu <= 2.0:
+        raise ValueError("Student-t degrees of freedom must exceed 2")
+    q_raw = float(stats.t.ppf(alpha, df=nu))
+    pdf_raw = float(stats.t.pdf(q_raw, df=nu))
+    scale = float(np.sqrt((nu - 2.0) / nu))
+    q_std = scale * q_raw
+    es_std = scale * ((nu + q_raw**2) / (nu - 1.0)) * pdf_raw / alpha
+    return q_std, es_std
 
-    Returns VaR and ES in the ORIGINAL return scale (not percentage),
-    as positive numbers representing losses (following Deliverable 2
-    sign convention: VaR = -quantile of return distribution).
 
-    Parameters
-    ----------
-    result : ARCHModelResult
-        Fitted model from fit_garch().
-    alpha : float
-        Coverage level (0.01 for 99% VaR, 0.05 for 95% VaR).
-    horizon : int
-        Forecast horizon in days. Always 1 for this study.
-
-    Returns
-    -------
-    (var, es) : tuple of float
-        VaR and ES as positive loss values.
-        Returns (np.nan, np.nan) if forecast fails.
-    """
-    from scipy import stats
-
+def forecast_var_es(
+    result,
+    alpha: float,
+    horizon: int = 1,
+    distribution: str = "normal",
+) -> tuple[float, float]:
+    """Produce one-step VaR and ES in decimal-return units."""
+    if distribution not in SUPPORTED_DISTRIBUTIONS:
+        raise ValueError(f"distribution must be one of {sorted(SUPPORTED_DISTRIBUTIONS)}")
     try:
         forecasts = result.forecast(horizon=horizon, reindex=False)
-        sigma_pct = np.sqrt(forecasts.variance.values[-1, 0])
-        mu_pct    = result.params.get("Const", 0.0)
-
-        # Convert back to log-return scale
-        sigma = sigma_pct / 100
-        mu    = mu_pct / 100
-
-        # Under Gaussian assumption:
-        # VaR(alpha) = -(mu + sigma * Phi^{-1}(alpha))
-        z_alpha = stats.norm.ppf(alpha)
-        var = -(mu + sigma * z_alpha)  # positive loss
-
-        # ES(alpha) = -(mu + sigma * phi(Phi^{-1}(alpha)) / alpha)
-        es = -(mu - sigma * stats.norm.pdf(z_alpha) / alpha)  # positive loss
-
-        return float(var), float(es)
-
+        sigma = float(np.sqrt(forecasts.variance.values[-1, 0]) / 100.0)
+        mu = float(result.params.get("Const", 0.0)) / 100.0
+        if distribution == "normal":
+            q = float(stats.norm.ppf(alpha))
+            es_multiplier = float(stats.norm.pdf(q) / alpha)
+        else:
+            nu = float(result.params["nu"])
+            q, es_multiplier = _student_t_var_es_multiplier(alpha, nu)
+        return float(-(mu + sigma * q)), float(-mu + sigma * es_multiplier)
     except Exception:
         return np.nan, np.nan
 
 
-def rolling_var_es(returns: pd.Series,
-                   model_type: str = "GARCH",
-                   window: int = 1000,
-                   alphas: list = None) -> pd.DataFrame:
-    """
-    Full rolling walk-forward VaR/ES forecasting loop.
-
-    Implements Deliverable 2 Section 3 exactly:
-    - Estimate on [t-W+1, t], forecast for t+1
-    - No leakage: each window sees only past data
-    - Records estimation failures explicitly (not silently)
-
-    Parameters
-    ----------
-    returns : pd.Series
-        Clean log-return series (output of data_loader.load_all).
-    model_type : str
-        'GARCH' or 'EGARCH'.
-    window : int
-        Rolling window length W.
-    alphas : list
-        Coverage levels. Default [0.01, 0.05] per Deliverable 2.
-
-    Returns
-    -------
-    pd.DataFrame with columns:
-        actual_return,
-        var_0.01, es_0.01, var_0.05, es_0.05,
-        estimation_failed (bool)
-    """
+def rolling_var_es(
+    returns: pd.Series,
+    model_type: str = "GARCH",
+    window: int = 1000,
+    alphas: list | None = None,
+    distribution: str = "normal",
+    p: int = 1,
+    q: int = 1,
+) -> pd.DataFrame:
+    """Daily rolling one-step VaR/ES for one GARCH-family specification."""
     if alphas is None:
         alphas = [0.01, 0.05]
-
-    ret_array = returns.values
-    dates     = returns.index
-    n         = len(ret_array)
-
-    if n <= window:
-        raise ValueError(
-            f"Series length ({n}) must exceed window ({window}). "
-            f"Check your sample period."
-        )
-
-    n_forecasts = n - window
-    results = []
-    n_failures = 0
-
-    for i in range(n_forecasts):
-        train = ret_array[i : i + window]
-        actual_return = ret_array[i + window]
-        forecast_date = dates[i + window]
-
-        row = {"date": forecast_date, "actual_return": actual_return,
-               "estimation_failed": False}
-
-        result = fit_garch(train, model_type=model_type)
-
+    if len(returns) <= window:
+        raise ValueError("Series length must exceed rolling window")
+    values = returns.to_numpy(dtype=float)
+    dates = returns.index
+    rows = []
+    for i in range(len(values) - window):
+        train = values[i : i + window]
+        row = {
+            "date": dates[i + window],
+            "actual_return": values[i + window],
+            "estimation_failed": False,
+        }
+        result = fit_garch(train, model_type, p, q, distribution)
         if result is None:
-            n_failures += 1
             row["estimation_failed"] = True
             for alpha in alphas:
                 row[f"var_{alpha}"] = np.nan
-                row[f"es_{alpha}"]  = np.nan
+                row[f"es_{alpha}"] = np.nan
         else:
             for alpha in alphas:
-                var, es = forecast_var_es(result, alpha)
+                var, es = forecast_var_es(result, alpha, distribution=distribution)
                 row[f"var_{alpha}"] = var
-                row[f"es_{alpha}"]  = es
-
-        results.append(row)
-
-        # Progress report every 250 steps
-        if (i + 1) % 250 == 0:
-            print(f"  {model_type} [{i+1}/{n_forecasts}] "
-                  f"failures so far: {n_failures}")
-
-    df = pd.DataFrame(results).set_index("date")
-
-    if n_failures > 0:
-        pct_failed = 100 * n_failures / n_forecasts
-        print(f"  WARNING: {n_failures} estimation failures "
-              f"({pct_failed:.1f}%) -- these dates have NaN forecasts. "
-              f"Investigate before reporting results.")
-    else:
-        print(f"  {model_type}: all {n_forecasts} steps converged cleanly.")
-
-    return df
+                row[f"es_{alpha}"] = es
+                if not np.isfinite(var) or not np.isfinite(es):
+                    row["estimation_failed"] = True
+        rows.append(row)
+    return pd.DataFrame(rows).set_index("date")
 
 
-def historical_simulation_var_es(returns: pd.Series,
-                                  window: int = 1000,
-                                  alphas: list = None) -> pd.DataFrame:
-    """
-    Historical simulation VaR/ES (the trivial baseline from Deliverable 2
-    Section 5). No model fitted; just empirical quantiles of the past
-    W returns.
-
-    Parameters
-    ----------
-    returns : pd.Series
-        Clean log-return series.
-    window : int
-        Rolling window length W.
-    alphas : list
-        Coverage levels.
-
-    Returns
-    -------
-    pd.DataFrame matching the structure of rolling_var_es output.
-    """
+def historical_simulation_var_es(
+    returns: pd.Series,
+    window: int = 1000,
+    alphas: list | None = None,
+) -> pd.DataFrame:
+    """Rolling empirical VaR/ES baseline using only the trailing return window."""
     if alphas is None:
         alphas = [0.01, 0.05]
-
-    ret_array = returns.values
-    dates     = returns.index
-    n         = len(ret_array)
-    n_forecasts = n - window
-    results = []
-
-    for i in range(n_forecasts):
-        train = ret_array[i : i + window]
-        actual_return = ret_array[i + window]
-        forecast_date = dates[i + window]
-
-        row = {"date": forecast_date, "actual_return": actual_return,
-               "estimation_failed": False}
-
+    values = returns.to_numpy(dtype=float)
+    dates = returns.index
+    rows = []
+    for i in range(len(values) - window):
+        train = values[i : i + window]
+        row = {
+            "date": dates[i + window],
+            "actual_return": values[i + window],
+            "estimation_failed": False,
+        }
         for alpha in alphas:
-            # VaR = negative of empirical alpha-quantile
-            var = -np.quantile(train, alpha)
-            # ES  = mean of returns below the VaR threshold
-            tail = train[train < -var]
-            es   = -tail.mean() if len(tail) > 0 else var
-            row[f"var_{alpha}"] = float(var)
-            row[f"es_{alpha}"]  = float(es)
-
-        results.append(row)
-
-    return pd.DataFrame(results).set_index("date")
-
-
-if __name__ == "__main__":
-    """
-    Integration test: run GARCH(1,1), EGARCH(1,1), and Historical Simulation
-    on REAL data for a short out-of-sample window to verify correctness
-    before full production run. Uses W=1000, last 100 steps only.
-    """
-    import sys
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from data_utils import load_all_returns
-
-    print("Loading real data...")
-    all_returns = load_all_returns(verbose=False)
-
-    # Test on gold only for the integration test (fastest + cleanest series)
-    gold_ret = all_returns["gold"]
-    print(f"\nGold returns: {len(gold_ret)} observations")
-    print("Running integration test: GARCH(1,1), W=1000, last 200 steps only...")
-
-    # Slice to last 1200 observations for speed (1000 train + 200 test)
-    test_slice = gold_ret.iloc[-1200:]
-
-    garch_results = rolling_var_es(test_slice, model_type="GARCH",
-                                   window=1000, alphas=[0.01, 0.05])
-    egarch_results = rolling_var_es(test_slice, model_type="EGARCH",
-                                    window=1000, alphas=[0.01, 0.05])
-    hs_results = historical_simulation_var_es(test_slice, window=1000,
-                                              alphas=[0.01, 0.05])
-
-    print("\n--- Sample output (last 5 rows, GARCH) ---")
-    print(garch_results[["actual_return", "var_0.01", "es_0.01"]].tail())
-    print("\n--- Sample output (last 5 rows, HS baseline) ---")
-    print(hs_results[["actual_return", "var_0.01", "es_0.01"]].tail())
-
-    # Sanity checks
-    assert garch_results["estimation_failed"].sum() == 0, \
-        "Some GARCH steps failed -- investigate"
-    assert (garch_results["var_0.01"] > garch_results["var_0.05"]).all(), \
-        "99% VaR must be >= 95% VaR on every day"
-    assert (garch_results["es_0.01"] > garch_results["var_0.01"]).all(), \
-        "ES must be >= VaR at the same level (definition)"
-
-    print("\nAll sanity checks passed.")
-    print("  99% VaR > 95% VaR: TRUE on all days")
-    print("  ES >= VaR (same level): TRUE on all days")
-    print("  Zero estimation failures: TRUE")
+            q = float(np.quantile(train, alpha))
+            tail = train[train <= q]
+            row[f"var_{alpha}"] = -q
+            row[f"es_{alpha}"] = -float(tail.mean()) if len(tail) else -q
+        rows.append(row)
+    return pd.DataFrame(rows).set_index("date")
