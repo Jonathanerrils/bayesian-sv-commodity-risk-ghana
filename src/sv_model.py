@@ -51,7 +51,7 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 RHAT_THRESHOLD = 1.01
 MIN_STRUCTURAL_ESS = 400
 FAST_MIN_ESS = 200
-MODEL_VERSION = "sv-filter-v4-primary-symmetric-noncentered"
+MODEL_VERSION = "sv-filter-exp-stationary-scale-tau"
 DEFAULT_ROLLING_MCMC_ATTEMPTS = (
     {"chains": 4, "tune": 1_000, "draws": 1_000},
     {"chains": 4, "tune": 2_000, "draws": 2_000},
@@ -103,8 +103,36 @@ def _common_parameters(T: int):
     mu = pm.Normal("mu", mu=-10.0, sigma=3.0)
     phi_raw = pm.Beta("phi_raw", alpha=20.0, beta=1.5)
     phi = pm.Deterministic("phi", 2.0 * phi_raw - 1.0)
-    sigma_eta = pm.HalfCauchy("sigma_eta", beta=0.5)
-    h, eta = _noncentered_state_path(mu, phi, sigma_eta, T)
+
+    # Experimental reparameterization: sample the stationary state scale
+    # tau = sigma_eta / sqrt(1 - phi^2) directly, while preserving exactly
+    # the original sigma_eta ~ HalfCauchy(0.5) prior.  Since
+    # sigma_eta = tau * sqrt(1 - phi^2), the transformed density is
+    # p(tau | phi) = p_HC(sigma_eta) * sqrt(1 - phi^2).
+    persistence_scale = pt.sqrt(pt.clip(1.0 - phi**2, 1e-12, np.inf))
+    stationary_sd = pm.HalfFlat("stationary_sd")
+    sigma_eta = pm.Deterministic("sigma_eta", stationary_sd * persistence_scale)
+    pm.Potential(
+        "sigma_eta_transformed_prior",
+        pm.logp(pm.HalfCauchy.dist(beta=0.5), sigma_eta)
+        + pt.log(persistence_scale),
+    )
+
+    h0_std = pm.Normal("h0_std", mu=0.0, sigma=1.0)
+    eta = pm.Normal("eta", mu=0.0, sigma=1.0, shape=T)
+    h0 = mu + stationary_sd * h0_std
+
+    def step(eta_t, h_prev, mu_, phi_, sigma_):
+        return mu_ + phi_ * (h_prev - mu_) + sigma_ * eta_t
+
+    h_rest, _ = pytensor.scan(
+        fn=step,
+        sequences=[eta],
+        outputs_info=[h0],
+        non_sequences=[mu, phi, sigma_eta],
+        strict=True,
+    )
+    h = pm.Deterministic("h", pt.concatenate([h0[None], h_rest]))
     return mu, phi, sigma_eta, h, eta
 
 
