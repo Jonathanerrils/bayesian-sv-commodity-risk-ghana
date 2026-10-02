@@ -1,9 +1,6 @@
 name: tau-ess50-combined-validation
 
 on:
-  pull_request:
-    paths:
-      - '.github/run-tau-ess50-validation'
   workflow_dispatch:
 
 permissions:
