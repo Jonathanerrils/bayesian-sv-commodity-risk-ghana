@@ -1,9 +1,6 @@
 name: baseline-synthetic-control
 
 on:
-  pull_request:
-    paths:
-      - '.github/run-baseline-synthetic-control'
   workflow_dispatch:
 
 permissions:
