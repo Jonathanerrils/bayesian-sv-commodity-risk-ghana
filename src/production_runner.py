@@ -22,6 +22,7 @@ from ou_model import OU_MODEL_VERSION, rolling_ou_var_es
 from sv_model import (
     DEFAULT_ROLLING_MCMC_ATTEMPTS,
     MODEL_VERSION,
+    RESAMPLE_ESS_FRACTION,
     PRIMARY_SV_VARIANTS,
     rolling_sv_var_es,
 )
@@ -31,7 +32,7 @@ RESULTS_DIR = PROJECT_ROOT / "outputs" / "v2"
 TABLES_DIR = RESULTS_DIR / "tables"
 CHECKPOINT_ROOT = PROJECT_ROOT / "checkpoints" / "v2"
 
-PIPELINE_VERSION = "risk-pipeline-v5-primary-symmetric-sv-checkpoint-safe"
+PIPELINE_VERSION = "risk-pipeline-v6-variant-sv-ess50"
 ALPHAS = [0.01, 0.05]
 COMMODITIES = ["cocoa", "gold", "oil"]
 DEFAULT_TARGET_ACCEPT = 0.95
@@ -215,6 +216,7 @@ def _backtest_rows(
         bt["target_accept"] = target_accept if model in SV_VARIANTS else np.nan
         bt["pipeline_version"] = PIPELINE_VERSION
         bt["model_version"] = MODEL_VERSION if model in SV_VARIANTS else "n/a"
+        bt["filter_resample_threshold"] = RESAMPLE_ESS_FRACTION if model in SV_VARIANTS else np.nan
         bt["ou_model_version"] = OU_MODEL_VERSION if model == "OU" else "n/a"
         bt["mcmc_policy"] = mcmc_policy_label() if model in SV_VARIANTS else "n/a"
         rows.append(bt)
@@ -350,6 +352,7 @@ def main():
         args.target_accept, PIPELINE_VERSION, MODEL_VERSION, OU_MODEL_VERSION,
     )
     logger.info("Rolling MCMC policy: %s", mcmc_policy_label())
+    logger.info("SV filter resampling threshold: %.2f x particle count", RESAMPLE_ESS_FRACTION)
 
     returns_all = load_all_returns(verbose=False)
     prices_all = load_all_prices()
