@@ -1,9 +1,6 @@
 name: gold-sv-gaussian-attempt2-validation
 
 on:
-  pull_request:
-    paths:
-      - '.github/run-gold-sv-gaussian-attempt2'
   workflow_dispatch:
 
 permissions:
