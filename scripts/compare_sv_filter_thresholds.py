@@ -19,6 +19,7 @@ from sv_model import (
     _observation_loglik,
     _predictive_returns,
     _transition_filter_state,
+    fit_sv,
     fit_sv_adaptive,
     initialize_filter_state,
     predictive_var_es,
@@ -72,6 +73,13 @@ def main():
     parser.add_argument("--target-accept", type=float, default=0.99)
     parser.add_argument("--thresholds", nargs="+", type=float, default=[0.25, 0.5, 0.75])
     parser.add_argument("--predictive-draws", type=int, default=20000)
+    parser.add_argument(
+        "--attempt-only",
+        type=int,
+        choices=range(1, len(DEFAULT_ROLLING_MCMC_ATTEMPTS) + 1),
+        default=None,
+        help="Run only one production escalation attempt, preserving its production seed.",
+    )
     parser.add_argument("--output-dir", type=Path, default=PROJECT_ROOT / "diagnostics")
     args = parser.parse_args()
 
@@ -86,13 +94,41 @@ def main():
     if block_end > len(returns):
         raise ValueError("requested block is incomplete")
 
-    fit = fit_sv_adaptive(
-        returns[start_i:train_end],
-        variant=args.variant,
-        target_accept=args.target_accept,
-        random_seed=42 + start_i,
-        attempts=DEFAULT_ROLLING_MCMC_ATTEMPTS,
-    )
+    if args.attempt_only is None:
+        fit = fit_sv_adaptive(
+            returns[start_i:train_end],
+            variant=args.variant,
+            target_accept=args.target_accept,
+            random_seed=42 + start_i,
+            attempts=DEFAULT_ROLLING_MCMC_ATTEMPTS,
+        )
+    else:
+        attempt_no = int(args.attempt_only)
+        cfg = DEFAULT_ROLLING_MCMC_ATTEMPTS[attempt_no - 1]
+        fit = fit_sv(
+            returns[start_i:train_end],
+            variant=args.variant,
+            chains=int(cfg["chains"]),
+            draws=int(cfg["draws"]),
+            tune=int(cfg["tune"]),
+            target_accept=args.target_accept,
+            random_seed=42 + start_i + attempt_no - 1,
+            fast_mode=False,
+        )
+        fit["accepted_attempt"] = attempt_no if fit.get("converged", False) else None
+        fit["mcmc_attempts"] = [{
+            "attempt": attempt_no,
+            "chains": int(cfg["chains"]),
+            "draws": int(cfg["draws"]),
+            "tune": int(cfg["tune"]),
+            "converged": bool(fit.get("converged", False)),
+            "max_rhat": fit.get("max_rhat"),
+            "min_ess": fit.get("min_ess"),
+            "n_divergences": fit.get("n_divergences"),
+            "rhat_by_var": fit.get("rhat_by_var", {}),
+            "ess_by_var": fit.get("ess_by_var", {}),
+            "error": fit.get("error"),
+        }]
     if not fit.get("converged", False):
         raise RuntimeError("comparison requires a converged structural fit")
 
