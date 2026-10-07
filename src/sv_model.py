@@ -51,7 +51,7 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 RHAT_THRESHOLD = 1.01
 MIN_STRUCTURAL_ESS = 400
 FAST_MIN_ESS = 200
-MODEL_VERSION = "sv-filter-v5-variant-geometry-ess50"
+MODEL_VERSION = "sv-filter-v6-gaussian-logitphi-tau-ess50"
 RESAMPLE_ESS_FRACTION = 0.5
 DEFAULT_ROLLING_MCMC_ATTEMPTS = (
     {"chains": 4, "tune": 1_000, "draws": 1_000},
@@ -101,9 +101,32 @@ def _noncentered_state_path(mu, phi, sigma_eta, T: int):
 
 
 def _common_parameters_original(T: int):
-    """Canonical innovation-noncentered geometry retained for Gaussian SV."""
+    """Original innovation-noncentered geometry used by diagnostic leverage SV."""
     mu = pm.Normal("mu", mu=-10.0, sigma=3.0)
     phi_raw = pm.Beta("phi_raw", alpha=20.0, beta=1.5)
+    phi = pm.Deterministic("phi", 2.0 * phi_raw - 1.0)
+    sigma_eta = pm.HalfCauchy("sigma_eta", beta=0.5)
+    h, eta = _noncentered_state_path(mu, phi, sigma_eta, T)
+    return mu, phi, sigma_eta, h, eta
+
+
+def _common_parameters_gaussian_logit_phi(T: int):
+    """Equivalent Gaussian geometry sampling persistence on a logit coordinate.
+
+    The statistical model is unchanged.  If z = logit(phi_raw), then
+    phi_raw = sigmoid(z).  A Flat prior on z plus the original Beta density
+    and log-Jacobian preserves phi_raw ~ Beta(20, 1.5) exactly.  sigma_eta
+    and the noncentered h0_std/eta state construction remain unchanged.
+    """
+    mu = pm.Normal("mu", mu=-10.0, sigma=3.0)
+    phi_logit = pm.Flat("phi_logit")
+    phi_raw = pm.Deterministic("phi_raw", pm.math.sigmoid(phi_logit))
+    pm.Potential(
+        "phi_raw_transformed_prior",
+        pm.logp(pm.Beta.dist(alpha=20.0, beta=1.5), phi_raw)
+        + pt.log(phi_raw)
+        + pt.log1p(-phi_raw),
+    )
     phi = pm.Deterministic("phi", 2.0 * phi_raw - 1.0)
     sigma_eta = pm.HalfCauchy("sigma_eta", beta=0.5)
     h, eta = _noncentered_state_path(mu, phi, sigma_eta, T)
@@ -150,7 +173,7 @@ def _common_parameters_tau(T: int):
 
 def build_sv_gaussian(returns: np.ndarray, T: int) -> pm.Model:
     with pm.Model() as model:
-        _mu, _phi, _sigma, h, _eta = _common_parameters_original(T)
+        _mu, _phi, _sigma, h, _eta = _common_parameters_gaussian_logit_phi(T)
         vol = pt.exp(h[:-1] / 2.0)
         pm.Normal("obs", mu=0.0, sigma=vol, observed=returns)
     return model
