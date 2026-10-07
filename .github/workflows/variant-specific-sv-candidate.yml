@@ -1,6 +1,9 @@
 name: variant-specific-sv-production-candidate
 
 on:
+  pull_request:
+    paths:
+      - '.github/run-promoted-gaussian-logitphi-validation'
   workflow_dispatch:
 
 permissions:
