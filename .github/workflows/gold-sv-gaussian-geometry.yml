@@ -1,9 +1,6 @@
 name: gold-sv-gaussian-geometry-diagnostic
 
 on:
-  pull_request:
-    paths:
-      - '.github/run-gold-sv-gaussian-geometry'
   workflow_dispatch:
 
 permissions:
