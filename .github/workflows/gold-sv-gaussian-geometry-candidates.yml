@@ -1,9 +1,6 @@
 name: gold-sv-gaussian-geometry-candidates
 
 on:
-  pull_request:
-    paths:
-      - '.github/run-gold-sv-gaussian-geometry-candidates'
   workflow_dispatch:
 
 permissions:
