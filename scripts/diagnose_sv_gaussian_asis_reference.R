@@ -47,7 +47,12 @@ read_returns <- function(commodity, n) {
   raw <- raw[keep, c("Date", "Close")]
   raw$Date <- as.Date(raw$Date)
   raw$Close <- suppressWarnings(as.numeric(raw$Close))
-  raw <- raw[is.finite(raw$Close) & raw$Close > 0, ]
+  raw <- raw[
+    raw$Date >= as.Date("2003-01-01") &
+    raw$Date <= as.Date("2026-06-22") &
+    is.finite(raw$Close) &
+    raw$Close > 0,
+  ]
   raw <- raw[order(raw$Date), ]
   r <- diff(log(raw$Close))
   r <- r[is.finite(r)]
