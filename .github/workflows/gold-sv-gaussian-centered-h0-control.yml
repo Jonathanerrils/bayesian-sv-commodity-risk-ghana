@@ -1,9 +1,6 @@
 name: gold-sv-gaussian-centered-h0-control
 
 on:
-  pull_request:
-    paths:
-      - '.github/run-gold-sv-gaussian-centered-h0-control'
   workflow_dispatch:
 
 permissions:
