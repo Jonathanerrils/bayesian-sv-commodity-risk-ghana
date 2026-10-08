@@ -1,6 +1,9 @@
 name: variant-specific-sv-production-candidate
 
 on:
+  pull_request:
+    paths:
+      - '.github/run-centeredh0-six-case-validation'
   workflow_dispatch:
 
 permissions:
