@@ -51,7 +51,7 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 RHAT_THRESHOLD = 1.01
 MIN_STRUCTURAL_ESS = 400
 FAST_MIN_ESS = 200
-MODEL_VERSION = "sv-filter-v6-gaussian-logitphi-tau-ess50"
+MODEL_VERSION = "sv-filter-v7-gaussian-centeredh0-tau-ess50"
 RESAMPLE_ESS_FRACTION = 0.5
 DEFAULT_ROLLING_MCMC_ATTEMPTS = (
     {"chains": 4, "tune": 1_000, "draws": 1_000},
@@ -107,6 +107,37 @@ def _common_parameters_original(T: int):
     phi = pm.Deterministic("phi", 2.0 * phi_raw - 1.0)
     sigma_eta = pm.HalfCauchy("sigma_eta", beta=0.5)
     h, eta = _noncentered_state_path(mu, phi, sigma_eta, T)
+    return mu, phi, sigma_eta, h, eta
+
+def _common_parameters_gaussian_centered_h0(T: int):
+    """Gaussian production geometry with a directly sampled stationary h0.
+
+    This preserves the same statistical model, priors, and innovation-
+    noncentered latent path used by the original Gaussian specification.
+    Only the initial stationary state is reparameterized: instead of sampling
+    h0_std ~ N(0,1) and scaling it by sigma_eta/sqrt(1-phi^2), NUTS samples
+    h0 directly from its identical stationary Normal distribution.
+    """
+    mu = pm.Normal("mu", mu=-10.0, sigma=3.0)
+    phi_raw = pm.Beta("phi_raw", alpha=20.0, beta=1.5)
+    phi = pm.Deterministic("phi", 2.0 * phi_raw - 1.0)
+    sigma_eta = pm.HalfCauchy("sigma_eta", beta=0.5)
+
+    stationary_sd = sigma_eta / pt.sqrt(pt.clip(1.0 - phi**2, 1e-12, np.inf))
+    h0 = pm.Normal("h0", mu=mu, sigma=stationary_sd)
+    eta = pm.Normal("eta", mu=0.0, sigma=1.0, shape=T)
+
+    def step(eta_t, h_prev, mu_, phi_, sigma_):
+        return mu_ + phi_ * (h_prev - mu_) + sigma_ * eta_t
+
+    h_rest, _ = pytensor.scan(
+        fn=step,
+        sequences=[eta],
+        outputs_info=[h0],
+        non_sequences=[mu, phi, sigma_eta],
+        strict=True,
+    )
+    h = pm.Deterministic("h", pt.concatenate([h0[None], h_rest]))
     return mu, phi, sigma_eta, h, eta
 
 
@@ -173,7 +204,7 @@ def _common_parameters_tau(T: int):
 
 def build_sv_gaussian(returns: np.ndarray, T: int) -> pm.Model:
     with pm.Model() as model:
-        _mu, _phi, _sigma, h, _eta = _common_parameters_gaussian_logit_phi(T)
+        _mu, _phi, _sigma, h, _eta = _common_parameters_gaussian_centered_h0(T)
         vol = pt.exp(h[:-1] / 2.0)
         pm.Normal("obs", mu=0.0, sigma=vol, observed=returns)
     return model
