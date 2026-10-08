@@ -1,6 +1,9 @@
 name: sv-gaussian-asis-reference
 
 on:
+  pull_request:
+    paths:
+      - '.github/run-sv-gaussian-asis-reference'
   workflow_dispatch:
 
 permissions:
