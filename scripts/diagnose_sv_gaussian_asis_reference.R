@@ -35,11 +35,11 @@ read_returns <- function(commodity, n) {
     raw <- read.csv(path, header = FALSE, stringsAsFactors = FALSE)
     names(raw)[1:2] <- c("Date", "Close")
   } else if (commodity == "gold") {
-    path <- file.path("data", "raw", "gold_primary.csv")
+    path <- file.path("data", "raw", "gold_raw.csv")
     raw <- read.csv(path, header = FALSE, stringsAsFactors = FALSE)
     names(raw)[1:2] <- c("Date", "Close")
   } else {
-    path <- file.path("data", "raw", "cocoa_primary.csv")
+    path <- file.path("data", "raw", "cocoa_raw.csv")
     raw <- read.csv(path, header = FALSE, stringsAsFactors = FALSE)
     names(raw)[1:2] <- c("Date", "Close")
   }
