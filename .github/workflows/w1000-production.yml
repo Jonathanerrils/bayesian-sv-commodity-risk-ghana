@@ -22,10 +22,6 @@ on:
         description: NUTS target acceptance probability
         required: true
         default: "0.99"
-      blocks_per_shard:
-        description: Number of complete 42-day SV refit blocks per job
-        required: true
-        default: "1"
   pull_request:
     types: [labeled]
 
@@ -41,7 +37,7 @@ env:
   REFIT_EVERY: ${{ inputs.refit_every || '42' }}
   PREDICTIVE_DRAWS: ${{ inputs.predictive_draws || '20000' }}
   TARGET_ACCEPT: ${{ inputs.target_accept || '0.99' }}
-  BLOCKS_PER_SHARD: ${{ inputs.blocks_per_shard || '1' }}
+  BLOCKS_PER_SHARD: "1"
   PYTHONUNBUFFERED: "1"
 
 jobs:
