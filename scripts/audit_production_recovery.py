@@ -145,8 +145,18 @@ def audit(
     source_run_id: str,
     source_head_sha: str,
     backfill_filter_threshold: bool,
+    backfill_validated_source_sha: str | None,
     normalized_dir: Path | None = None,
 ) -> dict:
+    if backfill_filter_threshold:
+        if not backfill_validated_source_sha:
+            raise RuntimeError("backfill requires --backfill-validated-source-sha")
+        if source_head_sha != backfill_validated_source_sha:
+            raise RuntimeError(
+                "refusing ESS50 provenance backfill for unvalidated source SHA: "
+                f"{source_head_sha} != {backfill_validated_source_sha}"
+            )
+
     candidates = _candidate_blocks(input_dir)
     rows = []
     recovery = {"cocoa": [], "gold": [], "oil": []}
@@ -286,6 +296,7 @@ def main() -> None:
     parser.add_argument("--target-accept", type=float, default=0.99)
     parser.add_argument("--filter-resample-threshold", type=float, default=0.5)
     parser.add_argument("--backfill-filter-threshold", action="store_true")
+    parser.add_argument("--backfill-validated-source-sha")
     args = parser.parse_args()
 
     plan = json.loads(args.plan.read_text(encoding="utf-8"))
@@ -298,6 +309,7 @@ def main() -> None:
         source_run_id=args.source_run_id,
         source_head_sha=args.source_head_sha,
         backfill_filter_threshold=args.backfill_filter_threshold,
+        backfill_validated_source_sha=args.backfill_validated_source_sha,
         normalized_dir=args.normalized_dir,
     )
 
