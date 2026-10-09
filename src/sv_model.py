@@ -51,7 +51,8 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 RHAT_THRESHOLD = 1.01
 MIN_STRUCTURAL_ESS = 400
 FAST_MIN_ESS = 200
-MODEL_VERSION = "sv-filter-v4-primary-symmetric-noncentered"
+MODEL_VERSION = "sv-filter-v7-gaussian-centeredh0-tau-ess50"
+RESAMPLE_ESS_FRACTION = 0.5
 DEFAULT_ROLLING_MCMC_ATTEMPTS = (
     {"chains": 4, "tune": 1_000, "draws": 1_000},
     {"chains": 4, "tune": 2_000, "draws": 2_000},
@@ -99,7 +100,8 @@ def _noncentered_state_path(mu, phi, sigma_eta, T: int):
     return h, eta
 
 
-def _common_parameters(T: int):
+def _common_parameters_original(T: int):
+    """Original innovation-noncentered geometry used by diagnostic leverage SV."""
     mu = pm.Normal("mu", mu=-10.0, sigma=3.0)
     phi_raw = pm.Beta("phi_raw", alpha=20.0, beta=1.5)
     phi = pm.Deterministic("phi", 2.0 * phi_raw - 1.0)
@@ -107,10 +109,102 @@ def _common_parameters(T: int):
     h, eta = _noncentered_state_path(mu, phi, sigma_eta, T)
     return mu, phi, sigma_eta, h, eta
 
+def _common_parameters_gaussian_centered_h0(T: int):
+    """Gaussian production geometry with a directly sampled stationary h0.
+
+    This preserves the same statistical model, priors, and innovation-
+    noncentered latent path used by the original Gaussian specification.
+    Only the initial stationary state is reparameterized: instead of sampling
+    h0_std ~ N(0,1) and scaling it by sigma_eta/sqrt(1-phi^2), NUTS samples
+    h0 directly from its identical stationary Normal distribution.
+    """
+    mu = pm.Normal("mu", mu=-10.0, sigma=3.0)
+    phi_raw = pm.Beta("phi_raw", alpha=20.0, beta=1.5)
+    phi = pm.Deterministic("phi", 2.0 * phi_raw - 1.0)
+    sigma_eta = pm.HalfCauchy("sigma_eta", beta=0.5)
+
+    stationary_sd = sigma_eta / pt.sqrt(pt.clip(1.0 - phi**2, 1e-12, np.inf))
+    h0 = pm.Normal("h0", mu=mu, sigma=stationary_sd)
+    eta = pm.Normal("eta", mu=0.0, sigma=1.0, shape=T)
+
+    def step(eta_t, h_prev, mu_, phi_, sigma_):
+        return mu_ + phi_ * (h_prev - mu_) + sigma_ * eta_t
+
+    h_rest, _ = pytensor.scan(
+        fn=step,
+        sequences=[eta],
+        outputs_info=[h0],
+        non_sequences=[mu, phi, sigma_eta],
+        strict=True,
+    )
+    h = pm.Deterministic("h", pt.concatenate([h0[None], h_rest]))
+    return mu, phi, sigma_eta, h, eta
+
+
+def _common_parameters_gaussian_logit_phi(T: int):
+    """Equivalent Gaussian geometry sampling persistence on a logit coordinate.
+
+    The statistical model is unchanged.  If z = logit(phi_raw), then
+    phi_raw = sigmoid(z).  A Flat prior on z plus the original Beta density
+    and log-Jacobian preserves phi_raw ~ Beta(20, 1.5) exactly.  sigma_eta
+    and the noncentered h0_std/eta state construction remain unchanged.
+    """
+    mu = pm.Normal("mu", mu=-10.0, sigma=3.0)
+    phi_logit = pm.Flat("phi_logit")
+    phi_raw = pm.Deterministic("phi_raw", pm.math.sigmoid(phi_logit))
+    pm.Potential(
+        "phi_raw_transformed_prior",
+        pm.logp(pm.Beta.dist(alpha=20.0, beta=1.5), phi_raw)
+        + pt.log(phi_raw)
+        + pt.log1p(-phi_raw),
+    )
+    phi = pm.Deterministic("phi", 2.0 * phi_raw - 1.0)
+    sigma_eta = pm.HalfCauchy("sigma_eta", beta=0.5)
+    h, eta = _noncentered_state_path(mu, phi, sigma_eta, T)
+    return mu, phi, sigma_eta, h, eta
+
+
+def _common_parameters_tau(T: int):
+    """Equivalent stationary-scale geometry used only by primary SV-t.
+
+    The statistical model and sigma_eta ~ HalfCauchy(0.5) prior are unchanged.
+    Sampling tau = sigma_eta / sqrt(1 - phi^2) directly changes NUTS geometry
+    only. The Jacobian term preserves the original prior exactly.
+    """
+    mu = pm.Normal("mu", mu=-10.0, sigma=3.0)
+    phi_raw = pm.Beta("phi_raw", alpha=20.0, beta=1.5)
+    phi = pm.Deterministic("phi", 2.0 * phi_raw - 1.0)
+
+    persistence_scale = pt.sqrt(pt.clip(1.0 - phi**2, 1e-12, np.inf))
+    stationary_sd = pm.HalfFlat("stationary_sd")
+    sigma_eta = pm.Deterministic("sigma_eta", stationary_sd * persistence_scale)
+    pm.Potential(
+        "sigma_eta_transformed_prior",
+        pm.logp(pm.HalfCauchy.dist(beta=0.5), sigma_eta)
+        + pt.log(persistence_scale),
+    )
+
+    h0_std = pm.Normal("h0_std", mu=0.0, sigma=1.0)
+    eta = pm.Normal("eta", mu=0.0, sigma=1.0, shape=T)
+    h0 = mu + stationary_sd * h0_std
+
+    def step(eta_t, h_prev, mu_, phi_, sigma_):
+        return mu_ + phi_ * (h_prev - mu_) + sigma_ * eta_t
+
+    h_rest, _ = pytensor.scan(
+        fn=step,
+        sequences=[eta],
+        outputs_info=[h0],
+        non_sequences=[mu, phi, sigma_eta],
+        strict=True,
+    )
+    h = pm.Deterministic("h", pt.concatenate([h0[None], h_rest]))
+    return mu, phi, sigma_eta, h, eta
+
 
 def build_sv_gaussian(returns: np.ndarray, T: int) -> pm.Model:
     with pm.Model() as model:
-        _mu, _phi, _sigma, h, _eta = _common_parameters(T)
+        _mu, _phi, _sigma, h, _eta = _common_parameters_gaussian_centered_h0(T)
         vol = pt.exp(h[:-1] / 2.0)
         pm.Normal("obs", mu=0.0, sigma=vol, observed=returns)
     return model
@@ -118,7 +212,7 @@ def build_sv_gaussian(returns: np.ndarray, T: int) -> pm.Model:
 
 def build_sv_t(returns: np.ndarray, T: int) -> pm.Model:
     with pm.Model() as model:
-        _mu, _phi, _sigma, h, _eta = _common_parameters(T)
+        _mu, _phi, _sigma, h, _eta = _common_parameters_tau(T)
         nu = _nu_prior()
         vol = pt.exp(h[:-1] / 2.0)
         obs_scale = vol * _pt_unit_variance_t_scale(nu)
@@ -129,7 +223,7 @@ def build_sv_t(returns: np.ndarray, T: int) -> pm.Model:
 def build_sv_leverage(returns: np.ndarray, T: int) -> pm.Model:
     """Diagnostic-only Gaussian SV with corr(epsilon_t, eta_t)=rho."""
     with pm.Model() as model:
-        _mu, _phi, _sigma, h, eta = _common_parameters(T)
+        _mu, _phi, _sigma, h, eta = _common_parameters_original(T)
         rho = pm.Uniform("rho", lower=-1.0, upper=1.0)
         vol = pt.exp(h[:-1] / 2.0)
         obs_mu = rho * vol * eta
@@ -147,7 +241,7 @@ def build_sv_t_leverage(returns: np.ndarray, T: int) -> pm.Model:
     it is excluded from the frozen v5 primary family.
     """
     with pm.Model() as model:
-        _mu, _phi, _sigma, h, eta = _common_parameters(T)
+        _mu, _phi, _sigma, h, eta = _common_parameters_original(T)
         nu = _nu_prior()
         rho = pm.Uniform("rho", lower=-1.0, upper=1.0)
         vol = pt.exp(h[:-1] / 2.0)
@@ -361,6 +455,9 @@ def initialize_filter_state(fit_result: dict) -> dict:
         "sigma_eta": trace.posterior["sigma_eta"].values.reshape(-1).astype(float),
         "h": trace.posterior["h"].values[:, :, -1].reshape(-1).astype(float),
     }
+    n_particles = len(state["h"])
+    state["weights"] = np.full(n_particles, 1.0 / n_particles, dtype=float)
+    state["particle_id"] = np.arange(n_particles, dtype=np.int64)
     if "nu" in trace.posterior:
         state["nu"] = trace.posterior["nu"].values.reshape(-1).astype(float)
     if "rho" in trace.posterior:
@@ -385,7 +482,12 @@ def _transition_filter_state(state: dict, rng: np.random.Generator) -> dict:
 def _predictive_returns(transition: dict, n_predictive: int, rng: np.random.Generator) -> np.ndarray:
     """Draw r_t from h_t jointly with proposed eta_t for diagnostic leverage."""
     n_particles = len(transition["h"])
-    idx = rng.integers(0, n_particles, size=int(n_predictive))
+    weights = np.asarray(
+        transition.get("weights", np.full(n_particles, 1.0 / n_particles)),
+        dtype=float,
+    )
+    weights = weights / weights.sum()
+    idx = rng.choice(n_particles, size=int(n_predictive), replace=True, p=weights)
     h = transition["h"][idx]
     eta = transition["eta"][idx]
     vol = np.exp(h / 2.0)
@@ -424,34 +526,73 @@ def _observation_loglik(transition: dict, actual_return: float) -> np.ndarray:
     return stats.norm.logpdf(x, loc=loc, scale=np.maximum(base_scale, 1e-12))
 
 
-def update_filter_state(transition: dict, actual_return: float, rng: np.random.Generator) -> tuple[dict, float]:
-    """Condition on r_t, resample, and advance particles from h_t to h_{t+1}."""
+def update_filter_state(
+    transition: dict,
+    actual_return: float,
+    rng: np.random.Generator,
+    resample_threshold: float = RESAMPLE_ESS_FRACTION,
+) -> tuple[dict, float]:
+    """Sequentially reweight particles and resample only when ESS is low."""
     if "h_next" not in transition:
         raise ValueError("transition is missing h_next; call _transition_filter_state first")
-    logw = _observation_loglik(transition, actual_return)
-    finite = np.isfinite(logw)
-    if not finite.any():
-        weights = np.full(len(logw), 1.0 / len(logw))
+    if not (0.0 < resample_threshold <= 1.0):
+        raise ValueError("resample_threshold must lie in (0, 1]")
+
+    n_particles = len(transition["h"])
+    prior_weights = np.asarray(
+        transition.get("weights", np.full(n_particles, 1.0 / n_particles)),
+        dtype=float,
+    )
+    prior_total = prior_weights.sum()
+    if (
+        prior_weights.shape != (n_particles,)
+        or not np.isfinite(prior_weights).all()
+        or prior_total <= 0.0
+    ):
+        prior_weights = np.full(n_particles, 1.0 / n_particles)
     else:
-        floor = np.nanmax(logw[finite]) - 1_000.0
-        logw = np.where(finite, logw, floor)
+        prior_weights = prior_weights / prior_total
+
+    loglik = _observation_loglik(transition, actual_return)
+    finite = np.isfinite(loglik)
+    if not finite.any():
+        posterior_weights = prior_weights.copy()
+    else:
+        floor = np.nanmax(loglik[finite]) - 1_000.0
+        loglik = np.where(finite, loglik, floor)
+        logw = np.log(np.maximum(prior_weights, np.finfo(float).tiny)) + loglik
         logw -= np.max(logw)
-        weights = np.exp(logw)
-        total = weights.sum()
+        posterior_weights = np.exp(logw)
+        total = posterior_weights.sum()
         if not np.isfinite(total) or total <= 0.0:
-            weights = np.full(len(logw), 1.0 / len(logw))
+            posterior_weights = np.full(n_particles, 1.0 / n_particles)
         else:
-            weights /= total
-    filter_ess = float(1.0 / np.sum(weights**2))
-    idx = rng.choice(len(weights), size=len(weights), replace=True, p=weights)
+            posterior_weights /= total
+
+    filter_ess = float(1.0 / np.sum(posterior_weights**2))
+    should_resample = filter_ess < float(resample_threshold) * n_particles
+
     new_state = {
         "variant": transition["variant"],
         "mean_return": transition["mean_return"],
     }
-    for key in ("mu", "phi", "sigma_eta", "nu", "rho"):
-        if key in transition:
-            new_state[key] = transition[key][idx]
-    new_state["h"] = transition["h_next"][idx]
+    keys = ("mu", "phi", "sigma_eta", "nu", "rho", "particle_id")
+    if should_resample:
+        idx = rng.choice(
+            n_particles, size=n_particles, replace=True, p=posterior_weights
+        )
+        for key in keys:
+            if key in transition:
+                new_state[key] = transition[key][idx]
+        new_state["h"] = transition["h_next"][idx]
+        new_state["weights"] = np.full(n_particles, 1.0 / n_particles)
+    else:
+        for key in keys:
+            if key in transition:
+                new_state[key] = np.asarray(transition[key]).copy()
+        new_state["h"] = np.asarray(transition["h_next"]).copy()
+        new_state["weights"] = posterior_weights
+    new_state["resampled"] = bool(should_resample)
     return new_state, filter_ess
 
 
@@ -497,7 +638,7 @@ def _save_filter_state(
     }
     if state is not None:
         arrays["mean_return"] = np.array([state["mean_return"]], dtype=float)
-        for key in ("mu", "phi", "sigma_eta", "nu", "rho", "h"):
+        for key in ("mu", "phi", "sigma_eta", "nu", "rho", "h", "weights", "particle_id"):
             if key in state:
                 arrays[key] = np.asarray(state[key])
     np.savez_compressed(path, **arrays)
@@ -532,7 +673,7 @@ def _load_filter_state(path: Path) -> tuple[dict | None, int, int, str]:
                 "variant": variant,
                 "mean_return": float(data["mean_return"][0]),
             }
-            for key in ("mu", "phi", "sigma_eta", "nu", "rho", "h"):
+            for key in ("mu", "phi", "sigma_eta", "nu", "rho", "h", "weights", "particle_id"):
                 if key in data.files:
                     state[key] = np.asarray(data[key])
         return (
@@ -619,6 +760,7 @@ def rolling_sv_var_es(
             "estimation_failed": False,
             "refit": False,
             "mcmc_converged": np.nan,
+            "filter_resample_threshold": RESAMPLE_ESS_FRACTION,
         }
 
         scheduled_refit = (i % refit_every) == 0
@@ -663,6 +805,10 @@ def rolling_sv_var_es(
                 transition, actual_return, step_rng
             )
             row["filter_ess"] = filter_ess
+            row["filter_resampled"] = bool(filter_state.get("resampled", False))
+            row["particle_unique_fraction"] = float(
+                np.unique(filter_state["particle_id"]).size / len(filter_state["particle_id"])
+            )
 
         results.append(row)
 

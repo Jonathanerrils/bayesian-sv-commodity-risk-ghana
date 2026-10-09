@@ -33,7 +33,7 @@ def test_run_key_changes_with_window_refit_sampler_target_and_versions():
     assert DEFAULT_TARGET_ACCEPT == 0.95
     assert PIPELINE_VERSION in a
     assert OU_MODEL_VERSION in a
-    assert "pipeline-v5" in a
+    assert "pipeline-v7" in a
 
 
 def test_v5_primary_model_family_is_frozen():

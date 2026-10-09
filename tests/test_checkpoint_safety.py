@@ -66,6 +66,8 @@ def test_core_sidecar_roundtrip_writes_schema_and_model_version(tmp_path):
         "sigma_eta": np.array([0.2, 0.21]),
         "nu": np.array([7.0, 8.0]),
         "h": np.array([-8.7, -8.6]),
+        "weights": np.array([0.25, 0.75]),
+        "particle_id": np.array([10, 11], dtype=np.int64),
     }
     _save_filter_state(path, state, next_i=17, active_block_start=0, variant="SV-t")
 
@@ -79,6 +81,9 @@ def test_core_sidecar_roundtrip_writes_schema_and_model_version(tmp_path):
     assert variant == "SV-t"
     assert restored is not None
     assert np.allclose(restored["h"], state["h"])
+    assert np.allclose(restored["weights"], state["weights"])
+    assert np.array_equal(restored["particle_id"], state["particle_id"])
+    assert SV_CHECKPOINT_SCHEMA_VERSION == 3
 
 
 def test_core_sidecar_rejects_missing_model_version(tmp_path):
