@@ -98,7 +98,7 @@ available.
 - Structural refits at global forecast indices 0, 42, 84, ... .
 - Between successful refits, posterior particles are filtered after every realised return.
 - Sequential importance weights are retained when the filter ESS is at least
-  50% of the particle count; systematic multinomial resampling is performed
+  50% of the particle count; multinomial resampling is performed
   only when filter ESS falls below that 50% threshold.
 - Forecast from h_t first, then condition on r_t and advance to h_{t+1}.
 - 20,000 posterior predictive draws per forecast date.
