@@ -16,8 +16,10 @@ from production_runner import BENCHMARK_MODELS, COMMODITIES, SV_VARIANTS
 
 
 def build(window: int, refit_every: int, blocks_per_shard: int) -> dict:
-    if blocks_per_shard < 1:
-        raise ValueError("blocks_per_shard must be >= 1")
+    if blocks_per_shard != 1:
+        raise ValueError(
+            "SV production is hard-fixed to exactly one 42-day refit block per job"
+        )
     returns_all = load_all_returns(verbose=False)
 
     benchmark = [
