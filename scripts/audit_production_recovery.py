@@ -297,6 +297,7 @@ def main() -> None:
     parser.add_argument("--filter-resample-threshold", type=float, default=0.5)
     parser.add_argument("--backfill-filter-threshold", action="store_true")
     parser.add_argument("--backfill-validated-source-sha")
+    parser.add_argument("--github-output", type=Path)
     args = parser.parse_args()
 
     plan = json.loads(args.plan.read_text(encoding="utf-8"))
@@ -318,6 +319,16 @@ def main() -> None:
     args.recovery_json.write_text(
         json.dumps(result["recovery_matrix"], indent=2), encoding="utf-8"
     )
+    if args.github_output:
+        with args.github_output.open("a", encoding="utf-8") as fh:
+            for commodity in ("cocoa", "gold", "oil"):
+                matrix = result["recovery_matrix"].get(commodity, [])
+                fh.write(
+                    f"recovery_{commodity}="
+                    f"{json.dumps(matrix, separators=(',', ':'))}\n"
+                )
+                fh.write(f"has_{commodity}={'true' if matrix else 'false'}\n")
+        fh = None
     print(json.dumps({"counts": result["counts"], "safe": result["safe_for_automatic_recovery"]}, indent=2))
 
     if not result["safe_for_automatic_recovery"]:
