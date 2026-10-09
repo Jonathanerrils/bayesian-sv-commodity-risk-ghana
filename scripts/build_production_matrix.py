@@ -75,7 +75,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--window", type=int, default=1000)
     parser.add_argument("--refit-every", type=int, default=42)
-    parser.add_argument("--blocks-per-shard", type=int, default=2)
+    parser.add_argument("--blocks-per-shard", type=int, default=1)
     parser.add_argument("--github-output", type=Path)
     parser.add_argument("--json-output", type=Path)
     args = parser.parse_args()
