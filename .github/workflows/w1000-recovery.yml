@@ -12,8 +12,6 @@ on:
         required: true
         type: boolean
         default: false
-  pull_request:
-    types: [labeled]
 
 permissions:
   contents: read
@@ -30,7 +28,6 @@ env:
 
 jobs:
   audit_source:
-    if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'audit-w1000-recovery'
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     outputs:
@@ -54,8 +51,8 @@ jobs:
         name: Read source run metadata
         env:
           GH_TOKEN: ${{ github.token }}
-          SOURCE_RUN_ID: ${{ inputs.source_run_id || '37871158815' }}
-          EXECUTE_RECOVERY: ${{ github.event_name == 'workflow_dispatch' && inputs.execute_recovery || false }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          EXECUTE_RECOVERY: ${{ inputs.execute_recovery }}
         run: |
           source_head_sha="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID" --jq .head_sha)"
           source_status="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID" --jq .status)"
@@ -71,7 +68,7 @@ jobs:
       - name: Download source-run artifacts
         env:
           GH_TOKEN: ${{ github.token }}
-          SOURCE_RUN_ID: ${{ inputs.source_run_id || '37871158815' }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
         run: |
           mkdir -p source_run
           gh run download "$SOURCE_RUN_ID" -D source_run
@@ -79,7 +76,7 @@ jobs:
       - id: audit
         name: Audit planned blocks and build exact recovery matrix
         env:
-          SOURCE_RUN_ID: ${{ inputs.source_run_id || '37871158815' }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
           SOURCE_HEAD_SHA: ${{ steps.meta.outputs.source_head_sha }}
         shell: bash
         run: |
@@ -131,7 +128,7 @@ jobs:
 
   recover_cocoa:
     needs: audit_source
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.execute_recovery && needs.audit_source.outputs.has_cocoa == 'true' }}
+    if: ${{ inputs.execute_recovery && needs.audit_source.outputs.has_cocoa == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 360
     strategy:
@@ -170,7 +167,7 @@ jobs:
 
   recover_gold:
     needs: audit_source
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.execute_recovery && needs.audit_source.outputs.has_gold == 'true' }}
+    if: ${{ inputs.execute_recovery && needs.audit_source.outputs.has_gold == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 360
     strategy:
@@ -209,7 +206,7 @@ jobs:
 
   recover_oil:
     needs: audit_source
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.execute_recovery && needs.audit_source.outputs.has_oil == 'true' }}
+    if: ${{ inputs.execute_recovery && needs.audit_source.outputs.has_oil == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 360
     strategy:
@@ -291,7 +288,7 @@ jobs:
             --input-dir combined_input \
             --audit-json final_recovery_audit.json \
             --recovery-json final_recovery_matrix.json \
-            --source-run-id "${{ inputs.source_run_id || '37871158815' }}" \
+            --source-run-id "${{ inputs.source_run_id }}" \
             --source-head-sha "${{ needs.audit_source.outputs.source_head_sha }}" \
             --refit-every "$REFIT_EVERY" \
             --target-accept "$TARGET_ACCEPT" \
