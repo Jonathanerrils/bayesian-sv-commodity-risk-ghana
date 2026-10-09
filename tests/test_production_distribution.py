@@ -102,8 +102,8 @@ def test_assembler_rejects_mismatched_sv_target_accept(tmp_path, monkeypatch):
         )
 
 
-def test_w1000_two_block_shards_preserve_complete_coverage():
-    matrix = build(window=1000, refit_every=42, blocks_per_shard=2)
+def test_w1000_one_block_shards_preserve_complete_nonoverlapping_coverage():
+    matrix = build(window=1000, refit_every=42, blocks_per_shard=1)
 
     for commodity in COMMODITIES:
         rows = matrix["sv"][commodity]
@@ -112,13 +112,13 @@ def test_w1000_two_block_shards_preserve_complete_coverage():
             variant_rows = [row for row in rows if row["model"] == variant]
             covered = []
             for row in variant_rows:
-                assert 1 <= row["n_blocks"] <= 2
+                assert row["n_blocks"] == 1
                 covered.extend(
                     range(row["start_block"], row["start_block"] + row["n_blocks"])
                 )
             assert covered == list(range(n_refit_blocks))
 
 
-def test_matrix_cli_default_is_two_blocks():
+def test_matrix_cli_default_is_one_block():
     source = (ROOT / "scripts" / "build_production_matrix.py").read_text(encoding="utf-8")
-    assert 'parser.add_argument("--blocks-per-shard", type=int, default=2)' in source
+    assert 'parser.add_argument("--blocks-per-shard", type=int, default=1)' in source
