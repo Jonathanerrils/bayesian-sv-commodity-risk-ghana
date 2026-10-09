@@ -102,6 +102,10 @@ def _candidate_blocks(root: Path) -> dict[BlockKey, list[tuple[Path, pd.DataFram
 
 
 def _strict_complete(block: pd.DataFrame, expected_i: list[int]) -> tuple[str | None, str]:
+    required = {"global_i", "refit", "estimation_failed", "mcmc_converged", *FORECAST_COLS}
+    missing = required.difference(block.columns)
+    if missing:
+        return None, f"missing required block columns: {sorted(missing)}"
     got = sorted(pd.to_numeric(block["global_i"], errors="raise").astype(int).tolist())
     if got != expected_i or len(got) != len(set(got)):
         return None, f"incomplete row coverage: expected {expected_i[0]}..{expected_i[-1]}, got {got[:3]}..{got[-3:] if got else []}"
@@ -190,17 +194,44 @@ def audit(
         elif len(terminal) == 1:
             path, block, status, reason = terminal[0]
 
-            observed_target = pd.to_numeric(block.get("target_accept"), errors="coerce")
-            if observed_target.isna().any() or not np.allclose(
+            if "target_accept" not in block:
+                status = "duplicate/conflicting"
+                reason = "missing target_accept provenance"
+                duplicates.append({
+                    "commodity": key.commodity,
+                    "model": key.model,
+                    "block_id": key.block_id,
+                    "sources": [str(path)],
+                    "reason": reason,
+                })
+                observed_target = None
+            else:
+                observed_target = pd.to_numeric(block["target_accept"], errors="coerce")
+            if observed_target is not None and (
+                observed_target.isna().any() or not np.allclose(
                 observed_target.to_numpy(dtype=float), target_accept, rtol=0.0, atol=1e-12
-            ):
+            )):
                 status = "duplicate/conflicting"
                 reason = f"target_accept provenance mismatch; expected {target_accept}"
-            else:
+                duplicates.append({
+                    "commodity": key.commodity,
+                    "model": key.model,
+                    "block_id": key.block_id,
+                    "sources": [str(path)],
+                    "reason": reason,
+                })
+            elif status != "duplicate/conflicting":
                 if "filter_resample_threshold" not in block:
                     if not backfill_filter_threshold:
                         status = "duplicate/conflicting"
                         reason = "missing filter_resample_threshold provenance"
+                        duplicates.append({
+                            "commodity": key.commodity,
+                            "model": key.model,
+                            "block_id": key.block_id,
+                            "sources": [str(path)],
+                            "reason": reason,
+                        })
                     else:
                         block["filter_resample_threshold"] = float(filter_threshold)
                         block["filter_resample_threshold_provenance"] = (
@@ -222,6 +253,13 @@ def audit(
                             "filter_resample_threshold provenance mismatch; "
                             f"expected {filter_threshold}"
                         )
+                        duplicates.append({
+                            "commodity": key.commodity,
+                            "model": key.model,
+                            "block_id": key.block_id,
+                            "sources": [str(path)],
+                            "reason": reason,
+                        })
 
             if status in TERMINAL and normalized_dir is not None:
                 block = block.sort_values("global_i").copy()
