@@ -52,10 +52,18 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          EXECUTE_RECOVERY: ${{ inputs.execute_recovery }}
         run: |
           source_head_sha="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID" --jq .head_sha)"
+          source_status="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID" --jq .status)"
+          source_conclusion="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID" --jq '.conclusion // "null"')"
           echo "source_head_sha=$source_head_sha" >> "$GITHUB_OUTPUT"
-          printf '{"source_run_id":"%s","source_head_sha":"%s"}\n' "$SOURCE_RUN_ID" "$source_head_sha" > source_run_metadata.json
+          if [[ "$EXECUTE_RECOVERY" == "true" && "$source_status" != "completed" ]]; then
+            echo "refusing recovery while source run $SOURCE_RUN_ID is $source_status" >&2
+            exit 1
+          fi
+          printf '{"source_run_id":"%s","source_head_sha":"%s","source_status":"%s","source_conclusion":"%s"}\n' \
+            "$SOURCE_RUN_ID" "$source_head_sha" "$source_status" "$source_conclusion" > source_run_metadata.json
 
       - name: Download source-run artifacts
         env:
