@@ -32,7 +32,7 @@ RESULTS_DIR = PROJECT_ROOT / "outputs" / "v2"
 TABLES_DIR = RESULTS_DIR / "tables"
 CHECKPOINT_ROOT = PROJECT_ROOT / "checkpoints" / "v2"
 
-PIPELINE_VERSION = "risk-pipeline-v6-variant-sv-ess50"
+PIPELINE_VERSION = "risk-pipeline-v7-centeredh0-tau-ess50"
 ALPHAS = [0.01, 0.05]
 COMMODITIES = ["cocoa", "gold", "oil"]
 DEFAULT_TARGET_ACCEPT = 0.95
