@@ -76,6 +76,7 @@ def test_assembler_rejects_mismatched_sv_target_accept(tmp_path, monkeypatch):
         "refit": [True, False],
         "block_id": [0, 0],
         "target_accept": [0.95, 0.95],
+        "filter_resample_threshold": [0.5, 0.5],
         "mcmc_converged": [True, np.nan],
         "mcmc_attempt": [1, np.nan],
         "mcmc_max_rhat": [1.005, np.nan],
@@ -99,3 +100,20 @@ def test_assembler_rejects_mismatched_sv_target_accept(tmp_path, monkeypatch):
             output_dir=tmp_path / "out",
             target_accept=0.99,
         )
+
+
+def test_w1000_two_block_shards_preserve_complete_coverage():
+    matrix = build(window=1000, refit_every=42, blocks_per_shard=2)
+
+    for commodity in COMMODITIES:
+        rows = matrix["sv"][commodity]
+        n_refit_blocks = matrix["metadata"][commodity]["n_refit_blocks"]
+        for variant in SV_VARIANTS:
+            variant_rows = [row for row in rows if row["model"] == variant]
+            covered = []
+            for row in variant_rows:
+                assert 1 <= row["n_blocks"] <= 2
+                covered.extend(
+                    range(row["start_block"], row["start_block"] + row["n_blocks"])
+                )
+            assert covered == list(range(n_refit_blocks))
