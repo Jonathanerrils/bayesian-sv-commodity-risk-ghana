@@ -266,6 +266,10 @@ jobs:
           name: recovery-source-package
           path: source_package
       - name: Download recovered block artifacts
+        if: >-
+          ${{ needs.audit_source.outputs.has_cocoa == 'true' ||
+              needs.audit_source.outputs.has_gold == 'true' ||
+              needs.audit_source.outputs.has_oil == 'true' }}
         uses: actions/download-artifact@v4
         with:
           pattern: recovery-sv-*
@@ -273,7 +277,7 @@ jobs:
           merge-multiple: true
       - name: Combine reusable and recovered shards
         run: |
-          mkdir -p combined_input
+          mkdir -p combined_input recovered
           find source_package/source_benchmarks -type f -name '*.csv' -exec cp {} combined_input/ \;
           find source_package/normalized_source_sv -type f -name '*.csv' -exec cp {} combined_input/ \;
           find recovered -type f -name 'sv__*.csv' -exec cp {} combined_input/ \;
