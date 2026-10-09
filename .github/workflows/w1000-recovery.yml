@@ -55,8 +55,7 @@ jobs:
         run: |
           source_head_sha="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID" --jq .head_sha)"
           echo "source_head_sha=$source_head_sha" >> "$GITHUB_OUTPUT"
-          printf '{"source_run_id":"%s","source_head_sha":"%s"}\n' \
-            "$SOURCE_RUN_ID" "$source_head_sha" > source_run_metadata.json
+          printf '{"source_run_id":"%s","source_head_sha":"%s"}\n' "$SOURCE_RUN_ID" "$source_head_sha" > source_run_metadata.json
 
       - name: Download source-run artifacts
         env:
@@ -79,15 +78,10 @@ jobs:
             exit 1
           fi
           cp "$plan" production_plan.json
-
           backfill=()
           if [[ "$SOURCE_RUN_ID" == "37871158815" && "$SOURCE_HEAD_SHA" == "$VALIDATED_LEGACY_V7_SHA" ]]; then
-            backfill=(
-              --backfill-filter-threshold
-              --backfill-validated-source-sha "$VALIDATED_LEGACY_V7_SHA"
-            )
+            backfill=(--backfill-filter-threshold --backfill-validated-source-sha "$VALIDATED_LEGACY_V7_SHA")
           fi
-
           python scripts/audit_production_recovery.py \
             --plan production_plan.json \
             --input-dir source_run \
@@ -101,7 +95,6 @@ jobs:
             --filter-resample-threshold "$FILTER_RESAMPLE_THRESHOLD" \
             --github-output "$GITHUB_OUTPUT" \
             "${backfill[@]}"
-
           mkdir -p source_benchmarks
           find source_run -type f -name 'benchmark__*.csv' -exec cp {} source_benchmarks/ \;
 
@@ -109,16 +102,7 @@ jobs:
         run: |
           echo "## W=1000 recovery source audit" >> "$GITHUB_STEP_SUMMARY"
           echo '```json' >> "$GITHUB_STEP_SUMMARY"
-          python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
-          import json
-          data=json.load(open("recovery_audit.json"))
-          print(json.dumps({
-              "source_run_id":data["source_run_id"],
-              "source_head_sha":data["source_head_sha"],
-              "counts":data["counts"],
-              "safe_for_automatic_recovery":data["safe_for_automatic_recovery"],
-          }, indent=2))
-          PY
+          python -c 'import json; d=json.load(open("recovery_audit.json")); print(json.dumps({"source_run_id":d["source_run_id"],"source_head_sha":d["source_head_sha"],"counts":d["counts"],"safe_for_automatic_recovery":d["safe_for_automatic_recovery"]}, indent=2))' >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/upload-artifact@v4
@@ -162,7 +146,7 @@ jobs:
             --n-blocks 1 \
             --window "$WINDOW" \
             --refit-every "$REFIT_EVERY" \
-            --predictive-draws "$PREDICTIT_DRAWS" \
+            --predictive-draws "$PREDICTIVE_DRAWS" \
             --target-accept "$TARGET_ACCEPT" \
             --output-dir recovery_shards
       - uses: actions/upload-artifact@v4
@@ -228,7 +212,7 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-      - run: pyton -m pip install --upgrade pip
+      - run: python -m pip install --upgrade pip
       - run: pip install -r requirements.txt
       - name: Recover one missing Oil block
         run: |
@@ -258,7 +242,7 @@ jobs:
           needs.audit_source.result == 'success' &&
           (needs.recover_cocoa.result == 'success' || needs.recover_cocoa.result == 'skipped') &&
           (needs.recover_gold.result == 'success' || needs.recover_gold.result == 'skipped') &&
-          (needs.recover_oil.result == 'success'|| needs.recover_oil.result == 'skipped') }}
+          (needs.recover_oil.result == 'success' || needs.recover_oil.result == 'skipped') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     steps:
@@ -266,4 +250,53 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-         ÿ½ÿûhéìþÚîÆ­yÿ
+          cache: pip
+      - run: python -m pip install --upgrade pip
+      - run: pip install -r requirements.txt
+      - uses: actions/download-artifact@v4
+        with:
+          name: recovery-source-package
+          path: source_package
+      - name: Download recovered block artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p recovered
+          gh run download "$GITHUB_RUN_ID" -p 'recovery-sv-*' -D recovered || true
+      - name: Combine reusable and recovered shards
+        run: |
+          mkdir -p combined_input
+          find source_package/source_benchmarks -type f -name '*.csv' -exec cp {} combined_input/ \;
+          find source_package/normalized_source_sv -type f -name '*.csv' -exec cp {} combined_input/ \;
+          find recovered -type f -name 'sv__*.csv' -exec cp {} combined_input/ \;
+      - name: Re-audit combined block set
+        run: |
+          python scripts/audit_production_recovery.py \
+            --plan source_package/production_plan.json \
+            --input-dir combined_input \
+            --audit-json final_recovery_audit.json \
+            --recovery-json final_recovery_matrix.json \
+            --source-run-id "${{ inputs.source_run_id }}" \
+            --source-head-sha "${{ needs.audit_source.outputs.source_head_sha }}" \
+            --refit-every "$REFIT_EVERY" \
+            --target-accept "$TARGET_ACCEPT" \
+            --filter-resample-threshold "$FILTER_RESAMPLE_THRESHOLD"
+          python -c 'import json; m=json.load(open("final_recovery_matrix.json")); n=sum(len(v) for v in m.values()); raise SystemExit(f"recovery left {n} infrastructure-missing blocks") if n else None'
+      - name: Assemble canonical recovered package
+        run: |
+          python scripts/assemble_production_run.py \
+            --input-dir combined_input \
+            --output-dir production_package \
+            --window "$WINDOW" \
+            --refit-every "$REFIT_EVERY" \
+            --predictive-draws "$PREDICTIVE_DRAWS" \
+            --target-accept "$TARGET_ACCEPT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: w1000-recovered-production-results
+          path: |
+            production_package/
+            final_recovery_audit.json
+            final_recovery_matrix.json
+          if-no-files-found: error
+          retention-days: 90
