@@ -117,3 +117,8 @@ def test_w1000_two_block_shards_preserve_complete_coverage():
                     range(row["start_block"], row["start_block"] + row["n_blocks"])
                 )
             assert covered == list(range(n_refit_blocks))
+
+
+def test_matrix_cli_default_is_two_blocks():
+    source = (ROOT / "scripts" / "build_production_matrix.py").read_text(encoding="utf-8")
+    assert 'parser.add_argument("--blocks-per-shard", type=int, default=2)' in source
