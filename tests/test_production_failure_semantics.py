@@ -75,6 +75,8 @@ def test_sv_shard_records_failed_block_and_continues_next_refit(monkeypatch, tmp
 
     assert calls["n"] == 2
     assert out["global_i"].tolist() == [0, 1, 2, 3]
+    assert "filter_resample_threshold" in out.columns
+    assert np.allclose(out["filter_resample_threshold"], 0.5)
 
     first = out[out["block_id"] == 0]
     second = out[out["block_id"] == 1]
