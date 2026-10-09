@@ -266,11 +266,11 @@ jobs:
           name: recovery-source-package
           path: source_package
       - name: Download recovered block artifacts
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          mkdir -p recovered
-          gh run download "$GITHUB_RUN_ID" -p 'recovery-sv-*' -D recovered || true
+        uses: actions/download-artifact@v4
+        with:
+          pattern: recovery-sv-*
+          path: recovered
+          merge-multiple: true
       - name: Combine reusable and recovered shards
         run: |
           mkdir -p combined_input
