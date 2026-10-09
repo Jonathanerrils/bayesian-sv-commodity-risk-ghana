@@ -21,6 +21,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from data_utils import load_all_returns
+from sv_model import RESAMPLE_ESS_FRACTION
 from production_runner import (
     ALL_MODELS,
     BENCHMARK_MODELS,
@@ -186,6 +187,23 @@ def assemble(
                     raise RuntimeError(
                         f"{commodity}/{model}: target_accept provenance mismatch; "
                         f"expected {target_accept}"
+                    )
+                if "filter_resample_threshold" not in merged:
+                    raise RuntimeError(
+                        f"{commodity}/{model}: missing filter_resample_threshold provenance"
+                    )
+                observed_resample = pd.to_numeric(
+                    merged["filter_resample_threshold"], errors="coerce"
+                )
+                if observed_resample.isna().any() or not np.allclose(
+                    observed_resample.to_numpy(dtype=float),
+                    float(RESAMPLE_ESS_FRACTION),
+                    rtol=0.0,
+                    atol=1e-12,
+                ):
+                    raise RuntimeError(
+                        f"{commodity}/{model}: filter resample threshold provenance mismatch; "
+                        f"expected {RESAMPLE_ESS_FRACTION}"
                     )
                 if "refit" not in merged:
                     raise RuntimeError(f"{commodity}/{model}: missing refit column")
