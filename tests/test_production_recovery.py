@@ -203,3 +203,42 @@ def test_backfill_rejects_unvalidated_source_sha(tmp_path):
         assert "unvalidated source SHA" in str(exc)
     else:
         raise AssertionError("unvalidated backfill should fail closed")
+
+
+def test_refit_execution_error_is_infrastructure_missing(tmp_path):
+    plan = _plan()
+    source = tmp_path / "source"
+    source.mkdir()
+
+    # Fill all blocks, then mark one complete-length block as an execution error.
+    for commodity in ("cocoa", "gold", "oil"):
+        for model in ("SV-Gaussian", "SV-t"):
+            for block in (0, 1):
+                path = _write_block(source, commodity, model, block)
+                if commodity == "oil" and model == "SV-t" and block == 1:
+                    frame = pd.read_csv(path)
+                    frame["estimation_failed"] = True
+                    frame[["var_0.01", "es_0.01", "var_0.05", "es_0.05"]] = np.nan
+                    frame.loc[0, "mcmc_converged"] = False
+                    frame.loc[0, "mcmc_error"] = "worker terminated during sampler setup"
+                    frame.to_csv(path, index=False)
+
+    result = audit(
+        plan,
+        source,
+        refit_every=42,
+        target_accept=0.99,
+        filter_threshold=0.5,
+        source_run_id="test",
+        source_head_sha=VALIDATED_SHA,
+        backfill_filter_threshold=False,
+        backfill_validated_source_sha=None,
+    )
+    row = next(
+        r for r in result["blocks"]
+        if r["commodity"] == "oil" and r["model"] == "SV-t" and r["block_id"] == 1
+    )
+    assert row["status"] == "infrastructure-missing"
+    assert result["recovery_matrix"]["oil"] == [
+        {"commodity": "oil", "model": "SV-t", "start_block": 1, "n_blocks": 1}
+    ]
