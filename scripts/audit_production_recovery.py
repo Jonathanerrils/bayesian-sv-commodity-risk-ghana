@@ -119,6 +119,10 @@ def _strict_complete(block: pd.DataFrame, expected_i: list[int]) -> tuple[str | 
     values = block[FORECAST_COLS].apply(pd.to_numeric, errors="coerce")
     finite = np.isfinite(values.to_numpy(dtype=float))
 
+    mcmc_error = str(first.get("mcmc_error", "") or "").strip()
+    if mcmc_error and mcmc_error.lower() != "nan":
+        return None, f"refit execution error: {mcmc_error}"
+
     mcmc_converged = _bool(first.get("mcmc_converged", np.nan), default=False)
     if mcmc_converged:
         if failed.any() or not finite.all():
