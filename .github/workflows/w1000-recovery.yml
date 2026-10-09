@@ -289,7 +289,7 @@ jobs:
             --refit-every "$REFIT_EVERY" \
             --target-accept "$TARGET_ACCEPT" \
             --filter-resample-threshold "$FILTER_RESAMPLE_THRESHOLD"
-          python -c 'import json; m=json.load(open("final_recovery_matrix.json")); n=sum(len(v) for v in m.values()); raise SystemExit(f"recovery left {n} infrastructure-missing blocks") if n else None'
+          python -c 'import json,sys; m=json.load(open("final_recovery_matrix.json")); n=sum(len(v) for v in m.values()); print(f"remaining infrastructure-missing blocks: {n}"); sys.exit(1 if n else 0)'
       - name: Assemble canonical recovered package
         run: |
           python scripts/assemble_production_run.py \
