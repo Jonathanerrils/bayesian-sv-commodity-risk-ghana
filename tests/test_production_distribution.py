@@ -13,7 +13,7 @@ from production_runner import BENCHMARK_MODELS, COMMODITIES, SV_VARIANTS
 
 
 def test_w1000_matrix_covers_every_refit_block_once_per_variant():
-    matrix = build(window=1000, refit_every=42, blocks_per_shard=4)
+    matrix = build(window=1000, refit_every=42, blocks_per_shard=1)
 
     assert len(matrix["benchmark"]) == len(COMMODITIES) * len(BENCHMARK_MODELS)
     assert {
@@ -32,7 +32,7 @@ def test_w1000_matrix_covers_every_refit_block_once_per_variant():
             variant_rows = [row for row in rows if row["model"] == variant]
             covered = []
             for row in variant_rows:
-                assert 1 <= row["n_blocks"] <= 4
+                assert row["n_blocks"] == 1
                 covered.extend(
                     range(row["start_block"], row["start_block"] + row["n_blocks"])
                 )
@@ -76,6 +76,7 @@ def test_assembler_rejects_mismatched_sv_target_accept(tmp_path, monkeypatch):
         "refit": [True, False],
         "block_id": [0, 0],
         "target_accept": [0.95, 0.95],
+        "filter_resample_threshold": [0.5, 0.5],
         "mcmc_converged": [True, np.nan],
         "mcmc_attempt": [1, np.nan],
         "mcmc_max_rhat": [1.005, np.nan],
@@ -99,3 +100,30 @@ def test_assembler_rejects_mismatched_sv_target_accept(tmp_path, monkeypatch):
             output_dir=tmp_path / "out",
             target_accept=0.99,
         )
+
+
+def test_w1000_one_block_shards_preserve_complete_nonoverlapping_coverage():
+    matrix = build(window=1000, refit_every=42, blocks_per_shard=1)
+
+    for commodity in COMMODITIES:
+        rows = matrix["sv"][commodity]
+        n_refit_blocks = matrix["metadata"][commodity]["n_refit_blocks"]
+        for variant in SV_VARIANTS:
+            variant_rows = [row for row in rows if row["model"] == variant]
+            covered = []
+            for row in variant_rows:
+                assert row["n_blocks"] == 1
+                covered.extend(
+                    range(row["start_block"], row["start_block"] + row["n_blocks"])
+                )
+            assert covered == list(range(n_refit_blocks))
+
+
+def test_matrix_cli_default_is_one_block():
+    source = (ROOT / "scripts" / "build_production_matrix.py").read_text(encoding="utf-8")
+    assert 'parser.add_argument("--blocks-per-shard", type=int, default=1)' in source
+
+
+def test_matrix_builder_rejects_multiblock_sv_sharding():
+    with pytest.raises(ValueError, match="exactly one 42-day refit block"):
+        build(window=1000, refit_every=42, blocks_per_shard=2)

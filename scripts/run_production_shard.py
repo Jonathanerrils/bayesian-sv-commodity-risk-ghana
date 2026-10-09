@@ -34,6 +34,7 @@ from production_runner import (
 )
 from sv_model import (
     DEFAULT_ROLLING_MCMC_ATTEMPTS,
+    RESAMPLE_ESS_FRACTION,
     _predictive_returns,
     _transition_filter_state,
     fit_sv_adaptive,
@@ -128,6 +129,7 @@ def _failed_block_rows(
             "model": variant,
             "shard_kind": "sv",
             "target_accept": target_accept,
+            "filter_resample_threshold": RESAMPLE_ESS_FRACTION,
             "mcmc_converged": False if first else np.nan,
             "mcmc_attempt": np.nan,
             "mcmc_max_rhat": fit.get("max_rhat", np.nan) if first else np.nan,
@@ -197,6 +199,7 @@ def run_sv_shard(
                 "model": variant,
                 "block_id": block_id,
                 "target_accept": target_accept,
+                "filter_resample_threshold": RESAMPLE_ESS_FRACTION,
                 "global_start_i": block_start,
                 "forecast_date": str(dates[block_start + window]),
                 "max_rhat": fit.get("max_rhat"),
@@ -242,6 +245,7 @@ def run_sv_shard(
                 "model": variant,
                 "shard_kind": "sv",
                 "target_accept": target_accept,
+                "filter_resample_threshold": RESAMPLE_ESS_FRACTION,
                 "mcmc_converged": True if first else np.nan,
                 "mcmc_attempt": fit.get("accepted_attempt", np.nan) if first else np.nan,
                 "mcmc_max_rhat": fit.get("max_rhat", np.nan) if first else np.nan,

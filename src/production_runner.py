@@ -35,7 +35,7 @@ CHECKPOINT_ROOT = PROJECT_ROOT / "checkpoints" / "v2"
 PIPELINE_VERSION = "risk-pipeline-v7-centeredh0-tau-ess50"
 ALPHAS = [0.01, 0.05]
 COMMODITIES = ["cocoa", "gold", "oil"]
-DEFAULT_TARGET_ACCEPT = 0.95
+DEFAULT_TARGET_ACCEPT = 0.99
 SV_VARIANTS = list(PRIMARY_SV_VARIANTS)
 GARCH_BENCHMARK_SPECS = {
     "GARCH": ("GARCH", "normal"),

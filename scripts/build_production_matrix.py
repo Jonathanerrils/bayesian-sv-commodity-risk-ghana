@@ -16,8 +16,10 @@ from production_runner import BENCHMARK_MODELS, COMMODITIES, SV_VARIANTS
 
 
 def build(window: int, refit_every: int, blocks_per_shard: int) -> dict:
-    if blocks_per_shard < 1:
-        raise ValueError("blocks_per_shard must be >= 1")
+    if blocks_per_shard != 1:
+        raise ValueError(
+            "SV production is hard-fixed to exactly one 42-day refit block per job"
+        )
     returns_all = load_all_returns(verbose=False)
 
     benchmark = [
@@ -75,7 +77,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--window", type=int, default=1000)
     parser.add_argument("--refit-every", type=int, default=42)
-    parser.add_argument("--blocks-per-shard", type=int, default=4)
+    parser.add_argument("--blocks-per-shard", type=int, default=1)
     parser.add_argument("--github-output", type=Path)
     parser.add_argument("--json-output", type=Path)
     args = parser.parse_args()
