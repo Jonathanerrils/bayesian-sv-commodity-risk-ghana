@@ -74,32 +74,10 @@ A refit is accepted only when all are true:
 
 A weak trace is never used for forecasting.
 
-### Validated v7 sampling geometry
-
-The corrected W=1000 production run uses the validated v7 implementation
-`sv-filter-v7-gaussian-centeredh0-tau-ess50`. These are mathematically
-equivalent parameterizations of the frozen v5 statistical models; they do not
-change the priors or likelihood:
-
-- `SV-Gaussian` samples the stationary initial log-volatility `h0` directly
-  from its implied Normal distribution instead of sampling `h0_std` and
-  multiplying by the stationary scale.
-- `SV-t` samples the stationary scale
-  `tau = sigma_eta / sqrt(1 - phi^2)` directly and includes the exact Jacobian
-  needed to preserve the original `sigma_eta ~ Half-Cauchy(0.5)` prior.
-- The full corrected production run uses `target_accept = 0.99`, matching the
-  six-case validation that preceded promotion of v7.
-
-These choices were fixed before the corrected W=1000 production results were
-available.
-
 ## 5. Rolling forecast/filter schedule
 
 - Structural refits at global forecast indices 0, 42, 84, ... .
 - Between successful refits, posterior particles are filtered after every realised return.
-- Sequential importance weights are retained when the filter ESS is at least
-  50% of the particle count; multinomial resampling is performed
-  only when filter ESS falls below that 50% threshold.
 - Forecast from h_t first, then condition on r_t and advance to h_{t+1}.
 - 20,000 posterior predictive draws per forecast date.
 - Deterministic random seeds tied to global forecast index.
@@ -116,11 +94,7 @@ Primary production uses versioned fail-closed SV checkpoints.
 - CSV and state-sidecar positions must match exactly for resume.
 - Old unversioned partial SV checkpoints require a clean restart.
 
-The model/pipeline version change deliberately separates all new production
-output from legacy checkpoints. The current corrected production identifiers
-are `sv-filter-v7-gaussian-centeredh0-tau-ess50` and
-`risk-pipeline-v7-centeredh0-tau-ess50`; checkpoints from earlier repair
-versions are not interchangeable with v7.
+The model/pipeline version change in v5 deliberately separates all new production output from legacy checkpoints.
 
 ## 7. OU benchmark
 
