@@ -1,0 +1,26 @@
+name: Dispatch final W1000 recovery
+
+on:
+  push:
+    branches:
+      - audit-fix/sv-validity-repair
+    paths:
+      - ".github/workflows/dispatch-final-w1000-recovery.yml"
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Dispatch locked recovery workflow
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh workflow run w1000-recovery.yml
+          --repo "$GITHUB_REPOSITORY"
+          --ref audit-fix/sv-validity-repair
+          -f source_run_id=37871158815
+          -f execute_recovery=true
