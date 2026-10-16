@@ -1,0 +1,27 @@
+name: w1000-production-smoke
+
+# The W=1000 smoke has already passed on the repaired SV pipeline. Keep this
+# expensive validation available on demand, but do not rerun it on every PR
+# synchronization while the validity-repair branch continues to evolve.
+on:
+  workflow_dispatch:
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install --upgrade pip
+      - run: pip install -r requirements.txt
+      - run: python scripts/smoke_w1000.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: w1000-smoke-artifacts
+          path: w1000_smoke_artifacts/
+          if-no-files-found: error

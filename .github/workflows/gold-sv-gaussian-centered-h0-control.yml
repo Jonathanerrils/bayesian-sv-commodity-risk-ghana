@@ -1,0 +1,38 @@
+name: gold-sv-gaussian-centered-h0-control
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: python -m pip install --upgrade pip
+      - run: pip install -r requirements.txt
+      - name: Run centered-h0 Gold SV-Gaussian control
+        run: >-
+          python scripts/diagnose_gaussian_geometry_candidates.py
+          --geometry centered-h0
+          --commodity gold
+          --block 0
+          --window 1000
+          --refit-every 42
+          --target-accept 0.99
+          --attempt 2
+          --output-dir diagnostics
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: gold-sv-gaussian-centered-h0-control
+          path: diagnostics/
+          if-no-files-found: error
+          retention-days: 30
