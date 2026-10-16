@@ -59,7 +59,10 @@ jobs:
           gh run download "$SOURCE_RUN_ID" -D source_run
           gh run download "$PRIOR_RECOVERY_RUN_ID" -D prior_recovery
           find source_run -type f -name '*.csv' -exec cp {} combined_input/ \;
-          find prior_recovery -type f -name 'sv__*.csv' -exec cp {} combined_input/ \;
+          # Only ingest actual first-wave recovery shard artifacts.  The prior run
+          # also contains recovery-source-package with normalized copies of the
+          # original source blocks; including those would duplicate source evidence.
+          find prior_recovery -type f -path '*/recovery-sv-*/*' -name 'sv__*.csv' -exec cp {} combined_input/ \;
           plan="$(find source_run -type f -name production_plan.json -print -quit)"
           if [[ -z "$plan" ]]; then
             echo "source run does not contain production_plan.json" >&2
