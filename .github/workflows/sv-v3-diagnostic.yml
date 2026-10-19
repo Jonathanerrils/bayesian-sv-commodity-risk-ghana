@@ -1,0 +1,52 @@
+name: sv-v5-divergence-geometry-comparison
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include:
+          - commodity: cocoa
+            variant: SV-t
+            block: 0
+            attempt: 2
+          - commodity: oil
+            variant: SV-t
+            block: 0
+            attempt: 1
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: python -m pip install --upgrade pip
+      - run: pip install -r requirements.txt
+      - name: Run geometry diagnostic
+        run: >-
+          python scripts/diagnose_sv_refit.py
+          --commodity "${{ matrix.commodity }}"
+          --variant "${{ matrix.variant }}"
+          --block "${{ matrix.block }}"
+          --attempt "${{ matrix.attempt }}"
+          --window 1000
+          --refit-every 42
+          --target-accept 0.99
+          --allow-nonconverged
+          --output-dir diagnostics
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: sv-v5-geometry-${{ matrix.commodity }}-${{ matrix.variant }}-attempt-${{ matrix.attempt }}
+          path: diagnostics/
+          if-no-files-found: error
+          retention-days: 30
