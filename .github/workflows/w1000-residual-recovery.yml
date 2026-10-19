@@ -12,6 +12,7 @@ permissions:
 env:
   SOURCE_RUN_ID: "37871158815"
   PRIOR_RECOVERY_RUN_ID: "38318956529"
+  SECOND_RECOVERY_RUN_ID: "38913509318"
   SOURCE_HEAD_SHA: "f121fc79a203a8712ac0efb1310dccd438e0b614"
   WINDOW: "1000"
   REFIT_EVERY: "42"
@@ -44,7 +45,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          for run_id in "$SOURCE_RUN_ID" "$PRIOR_RECOVERY_RUN_ID"; do
+          for run_id in "$SOURCE_RUN_ID" "$PRIOR_RECOVERY_RUN_ID" "$SECOND_RECOVERY_RUN_ID"; do
             status="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id" --jq .status)"
             if [[ "$status" != "completed" ]]; then
               echo "refusing residual recovery: run $run_id is $status" >&2
@@ -55,14 +56,16 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          mkdir -p source_run prior_recovery combined_input
+          mkdir -p source_run prior_recovery second_recovery combined_input
           gh run download "$SOURCE_RUN_ID" -D source_run
           gh run download "$PRIOR_RECOVERY_RUN_ID" -D prior_recovery
+          gh run download "$SECOND_RECOVERY_RUN_ID" -D second_recovery
           find source_run -type f -name '*.csv' -exec cp {} combined_input/ \;
           # Only ingest actual first-wave recovery shard artifacts.  The prior run
           # also contains recovery-source-package with normalized copies of the
           # original source blocks; including those would duplicate source evidence.
           find prior_recovery -type f -path '*/recovery-sv-*/*' -name 'sv__*.csv' -exec cp {} combined_input/ \;
+          find second_recovery -type f -path '*/residual-sv-*/*' -name 'sv__*.csv' -exec cp {} combined_input/ \;
           plan="$(find source_run -type f -name production_plan.json -print -quit)"
           if [[ -z "$plan" ]]; then
             echo "source run does not contain production_plan.json" >&2
@@ -70,7 +73,7 @@ jobs:
           fi
           cp "$plan" production_plan.json
       - id: audit
-        name: Audit combined source plus first recovery
+        name: Audit combined source plus first and second recovery waves
         run: |
           python scripts/audit_production_recovery.py \
             --plan production_plan.json \
