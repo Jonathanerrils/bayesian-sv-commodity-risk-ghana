@@ -403,6 +403,13 @@ def _checkpoint_number(value):
         return None
 
 
+def _checkpoint_diagnostics(values):
+    """Convert sampler diagnostics to finite JSON-safe numbers."""
+    if not isinstance(values, dict):
+        return {}
+    return {str(key): _checkpoint_number(value) for key, value in values.items()}
+
+
 def fit_sv_adaptive(
     returns: np.ndarray,
     variant: str = "SV-t",
@@ -472,8 +479,8 @@ def fit_sv_adaptive(
                  "max_rhat": _checkpoint_number(r["max_rhat"]),
                  "min_ess": _checkpoint_number(r["min_ess"]),
                  "n_divergences": _checkpoint_number(r["n_divergences"]),
-                 "rhat_by_var": r["rhat_by_var"],
-                 "ess_by_var": r["ess_by_var"],
+                 "rhat_by_var": _checkpoint_diagnostics(r["rhat_by_var"]),
+                 "ess_by_var": _checkpoint_diagnostics(r["ess_by_var"]),
                  "error": r["error"]}
                 for i, r in enumerate(records)
             ]
