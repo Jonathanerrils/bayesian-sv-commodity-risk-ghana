@@ -1,7 +1,8 @@
 """Single-stage SV MCMC command-line runner.
 
 Runs one attempt for one block and writes either a rejected-attempt checkpoint
-or a converged posterior artifact. It does NOT generate forecast CSVs.
+or a converged posterior artifact. A terminal failed attempt publishes
+a canonical unavailable-forecast CSV; successful forecasts are generated separately.
 """
 from __future__ import annotations
 
@@ -55,6 +56,13 @@ def main():
             variant=args.model, target_accept=args.target_accept,
             random_seed=args.random_seed + block_start,
             attempts=DEFAULT_ROLLING_MCMC_ATTEMPTS, provenance=args.provenance)
+    elif outcome == "unavailable":
+        from run_production_shard import run_sv_shard
+        run_sv_shard(
+            args.commodity, args.model, args.start_block, 1,
+            args.window, args.refit_every, 20_000, args.output_dir / "forecasts",
+            random_seed=args.random_seed, target_accept=args.target_accept,
+            checkpoint_provenance=args.provenance, staged_fit=fit)
     (args.output_dir / "stage-outcome.json").write_text(
         json.dumps({"outcome": outcome, "attempt": args.attempt,
                     "commodity": args.commodity, "model": args.model,
