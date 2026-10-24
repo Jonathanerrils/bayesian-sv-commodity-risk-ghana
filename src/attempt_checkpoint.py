@@ -54,6 +54,9 @@ def write_failed_attempts(path, identity, records):
         if (record.get("attempt") != i + 1 or record.get("converged") is not False
                 or record.get("configuration") != identity["attempts"][i]):
             raise ValueError("cannot checkpoint incomplete or converged attempt")
+    # A checkpoint is meaningful only after at least one completed rejection.
+    if not records:
+        raise ValueError("cannot write an empty attempt checkpoint")
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
     try:
