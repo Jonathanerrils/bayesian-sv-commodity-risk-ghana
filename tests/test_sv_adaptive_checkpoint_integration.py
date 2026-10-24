@@ -69,3 +69,20 @@ def test_all_failed_preserves_last_fit_diagnostics(monkeypatch, tmp_path):
     assert result["accepted_attempt"] is None
     assert len(result["mcmc_attempts"]) == 2
     assert len(__import__("json").loads(path.read_text())["records"]) == 1
+
+def test_nonfinite_numpy_diagnostics_checkpoint_safely(monkeypatch, tmp_path):
+    calls = []
+    def fake_fit(returns, **kwargs):
+        calls.append(kwargs["random_seed"])
+        return {"converged": False, "max_rhat": np.float64("nan"),
+                "min_ess": np.float64(100), "n_divergences": np.int64(0),
+                "rhat_by_var": {"mu": np.float64("nan"), "phi": np.float64(1.04)},
+                "ess_by_var": {"mu": np.float64("inf"), "phi": np.int64(100)}}
+    monkeypatch.setattr(sv_model, "fit_sv", fake_fit)
+    path = tmp_path / "attempt.json"
+    sv_model.fit_sv_adaptive(DATA, attempts=ATTEMPTS, checkpoint_path=path)
+    import json
+    doc = json.loads(path.read_text())
+    assert doc["records"][0]["rhat_by_var"]["mu"] is None
+    assert doc["records"][0]["ess_by_var"]["mu"] is None
+    assert doc["records"][0]["rhat_by_var"]["phi"] == 1.04
