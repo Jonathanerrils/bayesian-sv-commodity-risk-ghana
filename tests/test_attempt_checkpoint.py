@@ -57,3 +57,9 @@ def test_provenance_mismatch_rejected(tmp_path):
     write_failed_attempts(p,base,[record()])
     with pytest.raises(ValueError,match="identity"):
         read_failed_attempts(p,changed)
+
+def test_empty_checkpoint_is_not_published(tmp_path):
+    p = tmp_path / "attempt.json"
+    with pytest.raises(ValueError, match="empty"):
+        write_failed_attempts(p, identity(), [])
+    assert not p.exists()
