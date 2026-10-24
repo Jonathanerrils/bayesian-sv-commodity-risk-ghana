@@ -41,3 +41,19 @@ def test_tampered_checkpoint_rejected(tmp_path):
         read_failed_attempts(p,identity())
 def test_missing_checkpoint_is_empty(tmp_path):
     assert read_failed_attempts(tmp_path/"missing.json",identity())==[]
+
+def test_model_version_mismatch_rejected(tmp_path):
+    p=tmp_path/"attempt.json"
+    base=fingerprint(DATA,"SV-t",.99,42,ATTEMPTS,model_version="v1")
+    changed=fingerprint(DATA,"SV-t",.99,42,ATTEMPTS,model_version="v2")
+    write_failed_attempts(p,base,[record()])
+    with pytest.raises(ValueError,match="identity"):
+        read_failed_attempts(p,changed)
+
+def test_provenance_mismatch_rejected(tmp_path):
+    p=tmp_path/"attempt.json"
+    base=fingerprint(DATA,"SV-t",.99,42,ATTEMPTS,provenance="run-A")
+    changed=fingerprint(DATA,"SV-t",.99,42,ATTEMPTS,provenance="run-B")
+    write_failed_attempts(p,base,[record()])
+    with pytest.raises(ValueError,match="identity"):
+        read_failed_attempts(p,changed)
