@@ -176,6 +176,12 @@ def run_sv_shard(
         raise ValueError("n_blocks must be >= 1")
     if staged_fit is not None and n_blocks != 1:
         raise ValueError("staged_fit requires exactly one block")
+    if staged_fit is not None and staged_fit.get("variant") != variant:
+        raise ValueError("staged fit variant mismatch")
+    if staged_fit is not None and staged_fit.get("T") != window:
+        raise ValueError("staged fit training-window mismatch")
+    if staged_fit is not None and staged_fit.get("model_version") != MODEL_VERSION:
+        raise ValueError("staged fit model version mismatch")
 
     rows: list[dict] = []
     stop_block = min(start_block + n_blocks, total_blocks)
