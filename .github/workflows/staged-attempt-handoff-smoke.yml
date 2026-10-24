@@ -1,0 +1,83 @@
+name: staged-attempt-handoff-smoke
+
+# Mocked cross-job escalation. No real sampling, production inputs, or recovery.
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: ["audit-fix/**"]
+
+permissions:
+  contents: read
+
+jobs:
+  attempt-one:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install numpy
+      - name: Run synthetic rejected first attempt
+        run: |
+          PYTHONPATH=src python - <<'PY'
+          from pathlib import Path
+          import numpy as np
+          import staged_sv_attempt
+          attempts=({"chains":4,"tune":1000,"draws":1000},
+                    {"chains":4,"tune":2000,"draws":2000})
+          staged_sv_attempt.fit_sv=lambda returns, **kw: {
+              "converged":False,"max_rhat":1.04,"min_ess":100,
+              "n_divergences":0,"rhat_by_var":{},"ess_by_var":{}}
+          _, outcome=staged_sv_attempt.run_attempt(
+              np.array([.1,-.2,.3]),variant="SV-t",target_accept=.99,
+              random_seed=42,attempts=attempts,attempt_no=1,
+              checkpoint_path="handoff/failed-attempts.json",
+              provenance="synthetic-handoff-v1")
+          assert outcome=="needs_escalation"
+          assert Path("handoff/failed-attempts.json").is_file()
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: synthetic-stage-one-failure
+          path: handoff/failed-attempts.json
+          if-no-files-found: error
+          retention-days: 7
+
+  attempt-two:
+    needs: attempt-one
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install numpy
+      - uses: actions/download-artifact@v4
+        with:
+          name: synthetic-stage-one-failure
+          path: handoff
+      - name: Restore failed first attempt and execute only attempt two
+        run: |
+          PYTHONPATH=src python - <<'PY'
+          import numpy as np
+          import staged_sv_attempt
+          attempts=({"chains":4,"tune":1000,"draws":1000},
+                    {"chains":4,"tune":2000,"draws":2000})
+          seeds=[]
+          def fake_fit(returns, **kw):
+              seeds.append(kw["random_seed"])
+              return {"converged":True,"trace":object(),"max_rhat":1.0,
+                      "min_ess":600,"n_divergences":0}
+          staged_sv_attempt.fit_sv=fake_fit
+          fit,outcome=staged_sv_attempt.run_attempt(
+              np.array([.1,-.2,.3]),variant="SV-t",target_accept=.99,
+              random_seed=42,attempts=attempts,attempt_no=2,
+              checkpoint_path="handoff/failed-attempts.json",
+              provenance="synthetic-handoff-v1")
+          assert outcome=="complete"
+          assert fit["accepted_attempt"]==2
+          assert len(fit["mcmc_attempts"])==2
+          assert seeds==[43], f"unexpected sampler seeds: {seeds}"
+          print("Separate-job escalation validated; first attempt was not repeated")
+          PY
