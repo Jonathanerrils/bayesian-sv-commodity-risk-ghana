@@ -51,3 +51,21 @@ def test_rejects_checkpoint_for_different_returns(monkeypatch, tmp_path):
     sv_model.fit_sv_adaptive(DATA, attempts=ATTEMPTS, checkpoint_path=path)
     with pytest.raises(ValueError, match="identity mismatch"):
         sv_model.fit_sv_adaptive(DATA + .01, attempts=ATTEMPTS, checkpoint_path=path)
+
+def test_all_failed_preserves_last_fit_diagnostics(monkeypatch, tmp_path):
+    calls = []
+    def fake_fit(returns, **kwargs):
+        calls.append(kwargs["random_seed"])
+        return {"converged": False, "trace": None, "max_rhat": 1.08,
+                "min_ess": 72, "n_divergences": 3,
+                "error": "structural convergence failure"}
+    monkeypatch.setattr(sv_model, "fit_sv", fake_fit)
+    path = tmp_path / "attempt.json"
+    result = sv_model.fit_sv_adaptive(DATA, attempts=ATTEMPTS, checkpoint_path=path)
+    assert calls == [42, 43]
+    assert result["max_rhat"] == 1.08
+    assert result["n_divergences"] == 3
+    assert result["error"] == "structural convergence failure"
+    assert result["accepted_attempt"] is None
+    assert len(result["mcmc_attempts"]) == 2
+    assert len(__import__("json").loads(path.read_text())["records"]) == 1
