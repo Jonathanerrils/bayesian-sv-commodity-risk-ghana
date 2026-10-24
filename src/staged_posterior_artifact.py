@@ -28,6 +28,16 @@ def save_posterior_artifact(directory, fit, returns, *, variant, target_accept,
     identity = fingerprint(returns, variant, target_accept, random_seed, attempts,
                            model_version=MODEL_VERSION, provenance=provenance)
     trace_path = directory / "posterior.nc"
+    manifest_path = directory / "manifest.json"
+    # A completed publication is immutable. A retry with the same identity
+    # is idempotent; an incomplete or mismatched publication must be rejected.
+    if trace_path.exists() or manifest_path.exists():
+        if not (trace_path.exists() and manifest_path.exists()):
+            raise ValueError("incomplete posterior publication; use a clean directory")
+        load_posterior_artifact(
+            directory, returns, variant=variant, target_accept=target_accept,
+            random_seed=random_seed, attempts=attempts, provenance=provenance)
+        return directory
     temporary_trace = directory / "posterior.nc.tmp"
     az.to_netcdf(fit["trace"], temporary_trace)
     os.replace(temporary_trace, trace_path)
