@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 
@@ -67,6 +68,10 @@ def load_posterior_artifact(directory, returns, *, variant, target_accept,
         raise ValueError("invalid accepted attempt")
     if metadata.get("T") != len(returns):
         raise ValueError("posterior training length mismatch")
+    for key in ("max_rhat", "min_ess", "n_divergences"):
+        value = metadata.get(key)
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+            raise ValueError("posterior convergence diagnostic missing or invalid: " + key)
     trace_path = directory / "posterior.nc"
     if hashlib.sha256(trace_path.read_bytes()).hexdigest() != metadata.get("posterior_sha256"):
         raise ValueError("posterior artifact checksum mismatch")
