@@ -14,7 +14,7 @@ import numpy as np
 # A JSON record documents a completed rejected attempt; it is NOT a saved
 # posterior, and no trace may be reconstructed from this record.
 
-def fingerprint(returns, variant, target_accept, seed, attempts):
+def fingerprint(returns, variant, target_accept, seed, attempts, *, model_version=None, provenance=None):
     a = np.asarray(returns, dtype="<f8")
     if a.ndim != 1 or len(a) < 2 or not np.isfinite(a).all():
         raise ValueError("returns must be finite 1D array")
@@ -22,7 +22,10 @@ def fingerprint(returns, variant, target_accept, seed, attempts):
                 "draws": int(x["draws"])} for x in attempts]
     if not configs:
         raise ValueError("attempts must be nonempty")
-    return {"schema": 1, "data_sha256": hashlib.sha256(a.tobytes()).hexdigest(),
+    if provenance is not None and (not isinstance(provenance, str) or not provenance.strip()):
+        raise ValueError("provenance must be a nonempty string")
+    return {"schema": 2, "model_version": model_version,
+            "provenance": provenance, "data_sha256": hashlib.sha256(a.tobytes()).hexdigest(),
             "n": len(a), "variant": variant, "target_accept": float(target_accept),
             "seed": int(seed), "attempts": configs}
 
