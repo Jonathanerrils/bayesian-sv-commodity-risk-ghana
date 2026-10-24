@@ -183,6 +183,10 @@ def run_sv_shard(
         raise ValueError("staged fit training-window mismatch")
     if staged_fit is not None and staged_fit.get("model_version") != MODEL_VERSION:
         raise ValueError("staged fit model version mismatch")
+    if staged_fit is not None and not staged_fit.get("converged", False) and staged_fit.get("accepted_attempt") is not None:
+        raise ValueError("failed staged fit cannot have an accepted attempt")
+    if staged_fit is not None and staged_fit.get("converged", False) and staged_fit.get("trace") is None:
+        raise ValueError("converged staged fit requires a posterior trace")
 
     rows: list[dict] = []
     stop_block = min(start_block + n_blocks, total_blocks)
