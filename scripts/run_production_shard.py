@@ -33,6 +33,7 @@ from production_runner import (
     DEFAULT_TARGET_ACCEPT,
 )
 from sv_model import (
+    MODEL_VERSION,
     DEFAULT_ROLLING_MCMC_ATTEMPTS,
     RESAMPLE_ESS_FRACTION,
     _predictive_returns,
