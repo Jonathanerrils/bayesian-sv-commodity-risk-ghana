@@ -69,6 +69,7 @@ jobs:
           PYTHONPATH=src:scripts python - <<'PY'
           import numpy as np
           import pandas as pd
+          from pathlib import Path
           import run_production_shard as shard
           from staged_posterior_artifact import load_posterior_artifact
           from sv_model import DEFAULT_ROLLING_MCMC_ATTEMPTS
@@ -84,7 +85,7 @@ jobs:
           shard.fit_sv_adaptive=lambda *a,**kw: (_ for _ in ()).throw(
               AssertionError("unexpected MCMC refit"))
           result=shard.run_sv_shard(
-              "gold","SV-t",0,1,3,2,20,"handoff/forecasts",
+              "gold","SV-t",0,1,3,2,20,Path("handoff/forecasts"),
               staged_fit=fit)
           rows=pd.read_csv(result)
           assert len(rows)==2
