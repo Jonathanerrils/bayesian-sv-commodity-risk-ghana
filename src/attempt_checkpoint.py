@@ -10,6 +10,10 @@ import os
 from pathlib import Path
 import numpy as np
 
+# Production checkpointing must additionally pin model-version and run provenance.
+# A JSON record documents a completed rejected attempt; it is NOT a saved
+# posterior, and no trace may be reconstructed from this record.
+
 def fingerprint(returns, variant, target_accept, seed, attempts):
     a = np.asarray(returns, dtype="<f8")
     if a.ndim != 1 or len(a) < 2 or not np.isfinite(a).all():
