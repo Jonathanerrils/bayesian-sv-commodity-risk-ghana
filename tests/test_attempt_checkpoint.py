@@ -1,4 +1,7 @@
 import json
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 import numpy as np
 import pytest
 from attempt_checkpoint import fingerprint, read_failed_attempts, write_failed_attempts
