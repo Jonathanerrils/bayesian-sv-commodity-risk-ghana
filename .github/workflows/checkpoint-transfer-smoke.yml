@@ -3,6 +3,8 @@ name: checkpoint-transfer-smoke
 # Infrastructure-only smoke test. No production data or MCMC execution.
 on:
   workflow_dispatch:
+  pull_request:
+    branches: ["audit-fix/**"]
 
 permissions:
   contents: read
