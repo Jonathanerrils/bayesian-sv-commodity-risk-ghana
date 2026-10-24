@@ -191,6 +191,10 @@ def run_sv_shard(
             target_accept=target_accept,
             random_seed=random_seed + block_start,
             attempts=DEFAULT_ROLLING_MCMC_ATTEMPTS,
+            checkpoint_path=(
+                output_dir / "attempt_checkpoints" /
+                f"{commodity}__{_slug(variant)}__block-{block_id:04d}.json"
+            ),
         )
 
         if not fit.get("converged", False):
