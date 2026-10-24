@@ -2,7 +2,7 @@ name: tests
 
 on:
   push:
-    branches: [main, "audit-fix/**"]
+    branches: [main, "audit-fix/**", "development/sv-attempt-checkpointing"]
   pull_request:
 
 jobs:

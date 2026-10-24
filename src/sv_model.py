@@ -39,6 +39,8 @@ import pytensor
 import pytensor.tensor as pt
 from scipy import stats
 
+from attempt_checkpoint import fingerprint, read_failed_attempts, write_failed_attempts
+
 from checkpoint_safety import (
     checkpoint_schema_array,
     parse_bool_series,
@@ -393,19 +395,54 @@ def fit_sv(
         }
 
 
+def _checkpoint_number(value):
+    try:
+        value = float(value)
+        return value if np.isfinite(value) else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _checkpoint_diagnostics(values):
+    """Convert sampler diagnostics to finite JSON-safe numbers."""
+    if not isinstance(values, dict):
+        return {}
+    return {str(key): _checkpoint_number(value) for key, value in values.items()}
+
+
 def fit_sv_adaptive(
     returns: np.ndarray,
     variant: str = "SV-t",
     target_accept: float = 0.95,
     random_seed: int = 42,
     attempts=None,
+    checkpoint_path: Path | None = None,
+    checkpoint_provenance: str | None = None,
 ) -> dict:
-    """Apply the strict rolling MCMC escalation; never accept a weak trace."""
+    """Apply strict MCMC escalation, optionally resuming completed failed attempts."""
     if attempts is None:
         attempts = DEFAULT_ROLLING_MCMC_ATTEMPTS
+    identity = None
     records = []
+    if checkpoint_path is not None:
+        identity = fingerprint(returns, variant, target_accept, random_seed, attempts,
+                               model_version=MODEL_VERSION, provenance=checkpoint_provenance)
+        saved = read_failed_attempts(checkpoint_path, identity)
+        for record in saved:
+            records.append({
+                "attempt": record["attempt"], **record["configuration"],
+                "converged": False,
+                "max_rhat": record.get("max_rhat", np.nan),
+                "min_ess": record.get("min_ess", np.nan),
+                "n_divergences": record.get("n_divergences", np.nan),
+                "rhat_by_var": record.get("rhat_by_var", {}),
+                "ess_by_var": record.get("ess_by_var", {}),
+                "error": record.get("error"),
+            })
     final_fit = None
     for attempt_no, cfg in enumerate(attempts, start=1):
+        if attempt_no <= len(records):
+            continue
         fit = fit_sv(
             returns,
             variant=variant,
@@ -432,6 +469,22 @@ def fit_sv_adaptive(
         final_fit = fit
         if fit.get("converged", False):
             break
+        # Keep the terminal failed fit's original result semantics: only
+        # checkpoint an attempt when a later escalation remains.
+        if checkpoint_path is not None and attempt_no < len(attempts):
+            completed = [
+                {"attempt": r["attempt"],
+                 "configuration": identity["attempts"][i],
+                 "converged": False,
+                 "max_rhat": _checkpoint_number(r["max_rhat"]),
+                 "min_ess": _checkpoint_number(r["min_ess"]),
+                 "n_divergences": _checkpoint_number(r["n_divergences"]),
+                 "rhat_by_var": _checkpoint_diagnostics(r["rhat_by_var"]),
+                 "ess_by_var": _checkpoint_diagnostics(r["ess_by_var"]),
+                 "error": r["error"]}
+                for i, r in enumerate(records)
+            ]
+            write_failed_attempts(checkpoint_path, identity, completed)
     if final_fit is None:
         raise ValueError("at least one MCMC attempt is required")
     final_fit = dict(final_fit)

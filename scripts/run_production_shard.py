@@ -33,6 +33,7 @@ from production_runner import (
     DEFAULT_TARGET_ACCEPT,
 )
 from sv_model import (
+    MODEL_VERSION,
     DEFAULT_ROLLING_MCMC_ATTEMPTS,
     RESAMPLE_ESS_FRACTION,
     _predictive_returns,
@@ -159,6 +160,8 @@ def run_sv_shard(
     output_dir: Path,
     random_seed: int = DEFAULT_RANDOM_SEED,
     target_accept: float = DEFAULT_TARGET_ACCEPT,
+    checkpoint_provenance: str | None = None,
+    staged_fit: dict | None = None,
 ) -> Path:
     returns = load_all_returns(verbose=False)[commodity]
     ret_array = returns.to_numpy(dtype=float)
@@ -172,6 +175,18 @@ def run_sv_shard(
         raise ValueError(f"start_block={start_block} outside [0, {total_blocks - 1}]")
     if n_blocks < 1:
         raise ValueError("n_blocks must be >= 1")
+    if staged_fit is not None and n_blocks != 1:
+        raise ValueError("staged_fit requires exactly one block")
+    if staged_fit is not None and staged_fit.get("variant") != variant:
+        raise ValueError("staged fit variant mismatch")
+    if staged_fit is not None and staged_fit.get("T") != window:
+        raise ValueError("staged fit training-window mismatch")
+    if staged_fit is not None and staged_fit.get("model_version") != MODEL_VERSION:
+        raise ValueError("staged fit model version mismatch")
+    if staged_fit is not None and not staged_fit.get("converged", False) and staged_fit.get("accepted_attempt") is not None:
+        raise ValueError("failed staged fit cannot have an accepted attempt")
+    if staged_fit is not None and staged_fit.get("converged", False) and staged_fit.get("trace") is None:
+        raise ValueError("converged staged fit requires a posterior trace")
 
     rows: list[dict] = []
     stop_block = min(start_block + n_blocks, total_blocks)
@@ -185,12 +200,17 @@ def run_sv_shard(
         block_start = block_id * refit_every
         block_end = min(block_start + refit_every, n_forecasts)
         train = ret_array[block_start : block_start + window]
-        fit = fit_sv_adaptive(
+        fit = staged_fit if staged_fit is not None else fit_sv_adaptive(
             train,
             variant=variant,
             target_accept=target_accept,
             random_seed=random_seed + block_start,
             attempts=DEFAULT_ROLLING_MCMC_ATTEMPTS,
+            checkpoint_provenance=checkpoint_provenance,
+            checkpoint_path=(
+                output_dir / "attempt_checkpoints" /
+                f"{commodity}__{_slug(variant)}__block-{block_id:04d}.json"
+            ),
         )
 
         if not fit.get("converged", False):
@@ -285,9 +305,15 @@ def main() -> None:
     parser.add_argument("--predictive-draws", type=int, default=DEFAULT_PREDICTIVE_DRAWS)
     parser.add_argument("--target-accept", type=float, default=DEFAULT_TARGET_ACCEPT)
     parser.add_argument("--output-dir", type=Path, default=PROJECT_ROOT / "production_shards")
+    parser.add_argument("--checkpoint-provenance", default=None)
+    parser.add_argument("--posterior-artifact", type=Path, default=None,
+                        help="Restore a validated converged posterior instead of sampling")
     args = parser.parse_args()
     if not (0.0 < args.target_accept < 1.0):
         parser.error("--target-accept must lie strictly between 0 and 1")
+
+    if args.posterior_artifact is not None and (args.kind != "sv" or args.n_blocks != 1):
+        parser.error("--posterior-artifact requires --kind sv and --n-blocks 1")
 
     if args.kind == "benchmark":
         if args.model not in BENCHMARK_MODELS:
@@ -296,10 +322,24 @@ def main() -> None:
     else:
         if args.model not in SV_VARIANTS:
             parser.error(f"{args.model!r} is not an SV variant")
+        staged_fit = None
+        if args.posterior_artifact is not None:
+            from staged_posterior_artifact import load_posterior_artifact
+            returns = load_all_returns(verbose=False)[args.commodity].to_numpy(dtype=float)
+            block_start = args.start_block * args.refit_every
+            training = returns[block_start:block_start + args.window]
+            staged_fit = load_posterior_artifact(
+                args.posterior_artifact, training, variant=args.model,
+                target_accept=args.target_accept,
+                random_seed=DEFAULT_RANDOM_SEED + block_start,
+                attempts=DEFAULT_ROLLING_MCMC_ATTEMPTS,
+                provenance=args.checkpoint_provenance)
         path = run_sv_shard(
             args.commodity, args.model, args.start_block, args.n_blocks,
             args.window, args.refit_every, args.predictive_draws, args.output_dir,
             target_accept=args.target_accept,
+            checkpoint_provenance=args.checkpoint_provenance,
+            staged_fit=staged_fit,
         )
     print(f"Wrote production shard: {path}")
 

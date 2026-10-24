@@ -1,0 +1,73 @@
+name: checkpoint-transfer-smoke
+
+# Infrastructure-only smoke test. No production data or MCMC execution.
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: ["audit-fix/**"]
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  write-checkpoint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install numpy pytest
+      - name: Run checkpoint unit tests
+        run: python -m pytest -q tests/test_attempt_checkpoint.py
+      - name: Create synthetic completed-attempt checkpoint
+        run: |
+          PYTHONPATH=src python - <<'PY'
+          from pathlib import Path
+          from attempt_checkpoint import fingerprint, write_failed_attempts
+          import numpy as np
+          data=np.array([.1,-.2,.3],dtype=float)
+          attempts=({"chains":4,"tune":1000,"draws":1000},
+                    {"chains":4,"tune":2000,"draws":2000})
+          identity=fingerprint(data,"SV-t",.99,42,attempts)
+          write_failed_attempts(Path("checkpoint/attempt.json"),identity,[{
+              "attempt":1,"configuration":identity["attempts"][0],
+              "converged":False,"max_rhat":1.03,"min_ess":200,
+              "n_divergences":0
+          }])
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: synthetic-attempt-checkpoint
+          path: checkpoint/attempt.json
+          if-no-files-found: error
+          retention-days: 7
+
+  restore-checkpoint:
+    needs: write-checkpoint
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install numpy
+      - uses: actions/download-artifact@v4
+        with:
+          name: synthetic-attempt-checkpoint
+          path: restored
+      - name: Verify identity and continuation boundary
+        run: |
+          PYTHONPATH=src python - <<'PY'
+          from attempt_checkpoint import fingerprint, read_failed_attempts
+          import numpy as np
+          data=np.array([.1,-.2,.3],dtype=float)
+          attempts=({"chains":4,"tune":1000,"draws":1000},
+                    {"chains":4,"tune":2000,"draws":2000})
+          identity=fingerprint(data,"SV-t",.99,42,attempts)
+          records=read_failed_attempts("restored/attempt.json",identity)
+          assert len(records)==1 and records[0]["attempt"]==1
+          assert records[0]["converged"] is False
+          print("Synthetic checkpoint safely restored in a new runner")
+          PY
