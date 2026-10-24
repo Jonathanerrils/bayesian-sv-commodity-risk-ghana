@@ -460,7 +460,9 @@ def fit_sv_adaptive(
         final_fit = fit
         if fit.get("converged", False):
             break
-        if checkpoint_path is not None:
+        # Keep the terminal failed fit's original result semantics: only
+        # checkpoint an attempt when a later escalation remains.
+        if checkpoint_path is not None and attempt_no < len(attempts):
             completed = [
                 {"attempt": r["attempt"],
                  "configuration": identity["attempts"][i],
@@ -475,10 +477,6 @@ def fit_sv_adaptive(
             ]
             write_failed_attempts(checkpoint_path, identity, completed)
     if final_fit is None:
-        if checkpoint_path is not None and len(records) == len(attempts):
-            return {"trace": None, "converged": False,
-                    "accepted_attempt": None, "mcmc_attempts": records,
-                    "error": "all MCMC attempts previously failed"}
         raise ValueError("at least one MCMC attempt is required")
     final_fit = dict(final_fit)
     final_fit["mcmc_attempts"] = records
