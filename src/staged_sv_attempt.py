@@ -31,7 +31,12 @@ def run_attempt(returns, *, variant, target_accept, random_seed, attempts,
                  random_seed=random_seed + attempt_no - 1, fast_mode=False)
     fit = dict(fit)
     fit["accepted_attempt"] = attempt_no if fit.get("converged", False) else None
-    normalized_records = [\n        {**record.get("configuration", {}),\n         **{key: value for key, value in record.items() if key != "configuration"}}\n        for record in records\n    ]\n    fit["mcmc_attempts"] = normalized_records + [{
+    normalized_records = [
+        {**record.get("configuration", {}),
+         **{key: value for key, value in record.items() if key != "configuration"}}
+        for record in records
+    ]
+    fit["mcmc_attempts"] = normalized_records + [{
         "attempt": attempt_no, **identity["attempts"][attempt_no - 1],
         "converged": bool(fit.get("converged", False)),
         "max_rhat": fit.get("max_rhat"),
