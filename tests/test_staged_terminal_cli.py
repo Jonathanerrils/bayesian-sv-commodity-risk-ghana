@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 import run_staged_sv_attempt as stage
 import run_production_shard as shard
+from sv_model import MODEL_VERSION
 
 
 def test_cli_terminal_failure_writes_complete_forecast_block(monkeypatch,tmp_path):
@@ -18,7 +19,7 @@ def test_cli_terminal_failure_writes_complete_forecast_block(monkeypatch,tmp_pat
     def final_failure(training,**kwargs):
         assert kwargs["attempt_no"]==2
         return {"converged":False,"accepted_attempt":None,
-                "variant":"SV-t","model_version":stage.run_attempt.__module__ if False else __import__("sv_model").MODEL_VERSION,"T":len(training),
+                "variant":"SV-t","model_version":MODEL_VERSION,"T":len(training),
                 "mcmc_attempts":[{"attempt":1,"chains":4,"tune":1000,"draws":1000},
                                  {"attempt":2,"chains":4,"tune":2000,"draws":2000}],
                 "max_rhat":1.05,"min_ess":100,"n_divergences":0,
