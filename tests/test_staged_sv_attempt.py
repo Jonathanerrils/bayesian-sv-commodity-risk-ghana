@@ -100,3 +100,19 @@ def test_stage_two_rejects_wrong_campaign_before_sampling(monkeypatch, tmp_path)
             DATA, variant="SV-t", target_accept=.99, random_seed=42,
             attempts=ATTEMPTS, attempt_no=2, checkpoint_path=path,
             provenance="another-campaign")
+
+
+def test_attempt_does_not_modify_statistical_schedule(monkeypatch, tmp_path):
+    configurations = []
+    def fake_fit(returns, **kw):
+        configurations.append(kw)
+        return {"converged": False}
+    monkeypatch.setattr(staged_sv_attempt, "fit_sv", fake_fit)
+    path = tmp_path / "checkpoint.json"
+    call(1, path)
+    call(2, path)
+    assert [(c["chains"], c["tune"], c["draws"], c["target_accept"],
+             c["random_seed"], c["fast_mode"]) for c in configurations] == [
+        (4, 1000, 1000, .99, 42, False),
+        (4, 2000, 2000, .99, 43, False),
+    ]
