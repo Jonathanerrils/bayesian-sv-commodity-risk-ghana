@@ -160,6 +160,7 @@ def run_sv_shard(
     random_seed: int = DEFAULT_RANDOM_SEED,
     target_accept: float = DEFAULT_TARGET_ACCEPT,
     checkpoint_provenance: str | None = None,
+    staged_fit: dict | None = None,
 ) -> Path:
     returns = load_all_returns(verbose=False)[commodity]
     ret_array = returns.to_numpy(dtype=float)
@@ -173,6 +174,8 @@ def run_sv_shard(
         raise ValueError(f"start_block={start_block} outside [0, {total_blocks - 1}]")
     if n_blocks < 1:
         raise ValueError("n_blocks must be >= 1")
+    if staged_fit is not None and n_blocks != 1:
+        raise ValueError("staged_fit requires exactly one block")
 
     rows: list[dict] = []
     stop_block = min(start_block + n_blocks, total_blocks)
@@ -186,7 +189,7 @@ def run_sv_shard(
         block_start = block_id * refit_every
         block_end = min(block_start + refit_every, n_forecasts)
         train = ret_array[block_start : block_start + window]
-        fit = fit_sv_adaptive(
+        fit = staged_fit if staged_fit is not None else fit_sv_adaptive(
             train,
             variant=variant,
             target_accept=target_accept,
