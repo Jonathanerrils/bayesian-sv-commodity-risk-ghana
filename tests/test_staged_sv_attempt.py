@@ -67,3 +67,36 @@ def test_both_fail(monkeypatch, tmp_path):
 def test_rejects_invalid_attempt_number(tmp_path):
     with pytest.raises(ValueError, match="attempt_no"):
         call(3, tmp_path / "checkpoint.json")
+
+
+def test_second_attempt_retry_does_not_repeat_first(monkeypatch, tmp_path):
+    seeds = []
+    def fake_fit(returns, **kw):
+        seeds.append(kw["random_seed"])
+        if len(seeds) == 2:
+            raise KeyboardInterrupt("simulated cancelled second-stage runner")
+        return {"converged": False, "trace": None, "max_rhat": 1.04}
+    monkeypatch.setattr(staged_sv_attempt, "fit_sv", fake_fit)
+    path = tmp_path / "checkpoint.json"
+    _, outcome = call(1, path)
+    assert outcome == "needs_escalation"
+    with pytest.raises(KeyboardInterrupt):
+        call(2, path)
+    assert path.exists()
+    _, outcome = call(2, path)
+    assert outcome == "unavailable"
+    assert seeds == [42, 43, 43]
+
+
+def test_stage_two_rejects_wrong_campaign_before_sampling(monkeypatch, tmp_path):
+    monkeypatch.setattr(staged_sv_attempt, "fit_sv",
+                        lambda returns, **kw: {"converged": False})
+    path = tmp_path / "checkpoint.json"
+    call(1, path)
+    monkeypatch.setattr(staged_sv_attempt, "fit_sv",
+                        lambda returns, **kw: pytest.fail("must reject before sampling"))
+    with pytest.raises(ValueError, match="identity mismatch"):
+        staged_sv_attempt.run_attempt(
+            DATA, variant="SV-t", target_accept=.99, random_seed=42,
+            attempts=ATTEMPTS, attempt_no=2, checkpoint_path=path,
+            provenance="another-campaign")
