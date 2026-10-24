@@ -45,3 +45,16 @@ def test_failed_fit_cannot_publish_posterior(tmp_path):
     with pytest.raises(ValueError, match="only converged"):
         save_posterior_artifact(tmp_path, {"converged": False, "trace": None},
                                 DATA, **params())
+
+
+def test_corrupted_posterior_is_rejected(tmp_path):
+    trace = az.from_dict(posterior={"mu": np.zeros((2, 3))})
+    fit = {"converged": True, "trace": trace, "variant": "SV-t",
+           "model_version": MODEL_VERSION, "T": len(DATA),
+           "mean_return": 0., "max_rhat": 1.0, "min_ess": 500,
+           "n_divergences": 0, "accepted_attempt": 1}
+    save_posterior_artifact(tmp_path, fit, DATA, **params())
+    with (tmp_path / "posterior.nc").open("ab") as stream:
+        stream.write(b"corruption")
+    with pytest.raises(ValueError, match="checksum mismatch"):
+        load_posterior_artifact(tmp_path, DATA, **params())
