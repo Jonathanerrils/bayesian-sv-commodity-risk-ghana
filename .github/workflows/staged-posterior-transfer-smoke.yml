@@ -1,0 +1,94 @@
+name: staged-posterior-transfer-smoke
+
+# Synthetic posterior transfer across two independent GitHub runners.
+# No real data, sampler, or production recovery.
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: ["audit-fix/**"]
+
+permissions:
+  contents: read
+
+jobs:
+  publish-posterior:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install numpy pandas arviz pymc
+      - name: Create synthetic converged posterior
+        run: |
+          PYTHONPATH=src python - <<'PY'
+          import numpy as np
+          import arviz as az
+          from staged_posterior_artifact import save_posterior_artifact
+          from sv_model import MODEL_VERSION, DEFAULT_ROLLING_MCMC_ATTEMPTS
+          training=np.array([.01,-.02,.03])
+          trace=az.from_dict(posterior={
+              "mu":np.zeros((2,3)),"phi":np.full((2,3),.7),
+              "sigma_eta":np.full((2,3),.1),
+              "h":np.zeros((2,3,3)),"nu":np.full((2,3),9.)})
+          fit={"converged":True,"trace":trace,"variant":"SV-t",
+               "model_version":MODEL_VERSION,"T":3,
+               "mean_return":float(training.mean()),
+               "max_rhat":1.,"min_ess":600,"n_divergences":0,
+               "accepted_attempt":1,"mcmc_attempts":[
+                   {"attempt":1,"chains":4,"tune":1000,"draws":1000,
+                    "converged":True}]}
+          save_posterior_artifact(
+              "handoff/posterior",fit,training,variant="SV-t",
+              target_accept=.99,random_seed=42,
+              attempts=DEFAULT_ROLLING_MCMC_ATTEMPTS,
+              provenance="synthetic-cross-job")
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: synthetic-posterior
+          path: handoff/posterior/
+          if-no-files-found: error
+          retention-days: 7
+
+  restore-and-forecast:
+    needs: publish-posterior
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install numpy pandas arviz pymc
+      - uses: actions/download-artifact@v4
+        with:
+          name: synthetic-posterior
+          path: handoff/posterior
+      - name: Verify artifact and produce canonical forecasts without sampling
+        run: |
+          PYTHONPATH=src:scripts python - <<'PY'
+          import numpy as np
+          import pandas as pd
+          import run_production_shard as shard
+          from staged_posterior_artifact import load_posterior_artifact
+          from sv_model import DEFAULT_ROLLING_MCMC_ATTEMPTS
+          training=np.array([.01,-.02,.03])
+          fit=load_posterior_artifact(
+              "handoff/posterior",training,variant="SV-t",
+              target_accept=.99,random_seed=42,
+              attempts=DEFAULT_ROLLING_MCMC_ATTEMPTS,
+              provenance="synthetic-cross-job")
+          series=pd.Series(np.array([.01,-.02,.03,.015,-.01]),
+                           index=pd.date_range("2025-01-01",periods=5))
+          shard.load_all_returns=lambda verbose=False:{"gold":series}
+          shard.fit_sv_adaptive=lambda *a,**kw: (_ for _ in ()).throw(
+              AssertionError("unexpected MCMC refit"))
+          result=shard.run_sv_shard(
+              "gold","SV-t",0,1,3,2,20,"handoff/forecasts",
+              staged_fit=fit)
+          rows=pd.read_csv(result)
+          assert len(rows)==2
+          assert not rows["estimation_failed"].any()
+          assert rows["global_i"].tolist()==[0,1]
+          print("Cross-runner posterior restored; forecasts generated without refit")
+          PY
