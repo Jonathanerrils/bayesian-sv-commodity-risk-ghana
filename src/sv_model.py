@@ -410,6 +410,7 @@ def fit_sv_adaptive(
     random_seed: int = 42,
     attempts=None,
     checkpoint_path: Path | None = None,
+    checkpoint_provenance: str | None = None,
 ) -> dict:
     """Apply strict MCMC escalation, optionally resuming completed failed attempts."""
     if attempts is None:
@@ -417,7 +418,8 @@ def fit_sv_adaptive(
     identity = None
     records = []
     if checkpoint_path is not None:
-        identity = fingerprint(returns, variant, target_accept, random_seed, attempts)
+        identity = fingerprint(returns, variant, target_accept, random_seed, attempts,
+                               model_version=MODEL_VERSION, provenance=checkpoint_provenance)
         saved = read_failed_attempts(checkpoint_path, identity)
         for record in saved:
             records.append({
