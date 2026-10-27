@@ -39,3 +39,21 @@ def test_corrupt_attempt_fails_closed(tmp_path):
     (tmp_path / "broken.nc").write_text("invalid")
     with pytest.raises(RuntimeError, match="Invalid completed-attempt checkpoint"):
         load_attempt(tmp_path, "broken")
+
+
+def test_checkpoint_fingerprint_mismatch_fails_closed(tmp_path):
+    trace = az.from_dict(
+        posterior={"mu": np.ones((2, 4))},
+        sample_stats={"diverging": np.zeros((2, 4), dtype=bool)},
+    )
+    assert save_attempt(tmp_path, "correct", {"trace": trace})
+    (tmp_path / "correct.nc").rename(tmp_path / "wrong.nc")
+    with pytest.raises(RuntimeError, match="Invalid completed-attempt checkpoint"):
+        load_attempt(tmp_path, "wrong")
+
+
+def test_missing_divergence_diagnostics_fails_closed(tmp_path):
+    trace = az.from_dict(posterior={"mu": np.ones((2, 4))})
+    assert save_attempt(tmp_path, "missing", {"trace": trace})
+    with pytest.raises(RuntimeError, match="Invalid completed-attempt checkpoint"):
+        load_attempt(tmp_path, "missing")
