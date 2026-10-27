@@ -21,7 +21,7 @@ def test_fingerprint_changes_with_data_and_configuration():
 
 
 def test_complete_attempt_roundtrip(tmp_path):
-    trace = az.from_dict(posterior={"mu": np.ones((2, 4))})
+    trace = az.from_dict(posterior={"mu": np.ones((2, 4))}, sample_stats={"diverging": np.zeros((2, 4), dtype=bool)})
     key = "abc"
     assert save_attempt(tmp_path, key, {"trace": trace})
     restored = load_attempt(tmp_path, key)
