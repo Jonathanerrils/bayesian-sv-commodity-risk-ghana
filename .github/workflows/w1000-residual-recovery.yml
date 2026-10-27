@@ -140,7 +140,15 @@ jobs:
           mkdir -p attempt_checkpoints
           gh run download "$CHECKPOINT_SOURCE_RUN_ID" \
             --pattern "attempt-checkpoints-${{ matrix.commodity }}-${{ matrix.model }}-${{ matrix.start_block }}" \
-            -D attempt_checkpoints
+            -D restored_checkpoints
+          find restored_checkpoints -type f -name '*.nc' -print0 | while IFS= read -r -d '' file; do
+            dest="attempt_checkpoints/$(basename "$file")"
+            if [[ -e "$dest" ]]; then
+              echo "Duplicate restored checkpoint filename: $dest" >&2
+              exit 1
+            fi
+            cp "$file" "$dest"
+          done
       - name: Run bounded recovery with checkpoint-upload reserve
         id: bounded_recovery
         continue-on-error: true
@@ -201,7 +209,15 @@ jobs:
           mkdir -p attempt_checkpoints
           gh run download "$CHECKPOINT_SOURCE_RUN_ID" \
             --pattern "attempt-checkpoints-${{ matrix.commodity }}-${{ matrix.model }}-${{ matrix.start_block }}" \
-            -D attempt_checkpoints
+            -D restored_checkpoints
+          find restored_checkpoints -type f -name '*.nc' -print0 | while IFS= read -r -d '' file; do
+            dest="attempt_checkpoints/$(basename "$file")"
+            if [[ -e "$dest" ]]; then
+              echo "Duplicate restored checkpoint filename: $dest" >&2
+              exit 1
+            fi
+            cp "$file" "$dest"
+          done
       - name: Run bounded recovery with checkpoint-upload reserve
         id: bounded_recovery
         continue-on-error: true
@@ -262,7 +278,15 @@ jobs:
           mkdir -p attempt_checkpoints
           gh run download "$CHECKPOINT_SOURCE_RUN_ID" \
             --pattern "attempt-checkpoints-${{ matrix.commodity }}-${{ matrix.model }}-${{ matrix.start_block }}" \
-            -D attempt_checkpoints
+            -D restored_checkpoints
+          find restored_checkpoints -type f -name '*.nc' -print0 | while IFS= read -r -d '' file; do
+            dest="attempt_checkpoints/$(basename "$file")"
+            if [[ -e "$dest" ]]; then
+              echo "Duplicate restored checkpoint filename: $dest" >&2
+              exit 1
+            fi
+            cp "$file" "$dest"
+          done
       - name: Run bounded recovery with checkpoint-upload reserve
         id: bounded_recovery
         continue-on-error: true
