@@ -36,6 +36,7 @@ def save_attempt(directory: Path, key: str, fit: dict):
     try:
         trace = fit["trace"].copy()
         trace.attrs["attempt_checkpoint_key"] = key
+        trace.attrs["checkpoint_schema_version"] = "1"
         az.to_netcdf(trace, str(temp))
         os.replace(temp, target)
     finally:
@@ -50,13 +51,15 @@ def load_attempt(directory: Path, key: str):
         return None
     try:
         trace = az.from_netcdf(str(path))
+        if trace.attrs.get("checkpoint_schema_version") != "1":
+            raise ValueError("Checkpoint schema version mismatch")
         if trace.attrs.get("attempt_checkpoint_key") != key:
             raise ValueError("Checkpoint fingerprint mismatch")
         if "posterior" not in trace.groups() or "sample_stats" not in trace.groups():
             raise ValueError("Checkpoint missing posterior or sampling diagnostics")
         posterior = trace.posterior
         stats = trace.sample_stats
-        if not posterior.data_vars or "diverging" not in stats:
+        if len(posterior.data_vars) == 0 or "diverging" not in stats:
             raise ValueError("Checkpoint missing structural samples or divergence diagnostics")
         if posterior.sizes.get("chain", 0) < 1 or posterior.sizes.get("draw", 0) < 1:
             raise ValueError("Checkpoint contains no posterior draws")
