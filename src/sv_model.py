@@ -39,6 +39,8 @@ import pytensor
 import pytensor.tensor as pt
 from scipy import stats
 
+from attempt_checkpoint import fingerprint, load_attempt, save_attempt
+
 from checkpoint_safety import (
     checkpoint_schema_array,
     parse_bool_series,
@@ -399,23 +401,44 @@ def fit_sv_adaptive(
     target_accept: float = 0.95,
     random_seed: int = 42,
     attempts=None,
+    attempt_checkpoint_dir: Path | None = None,
 ) -> dict:
-    """Apply the strict rolling MCMC escalation; never accept a weak trace."""
+    """Apply strict rolling MCMC escalation, reusing verified completed attempts."""
     if attempts is None:
         attempts = DEFAULT_ROLLING_MCMC_ATTEMPTS
     records = []
     final_fit = None
     for attempt_no, cfg in enumerate(attempts, start=1):
-        fit = fit_sv(
-            returns,
-            variant=variant,
-            chains=int(cfg["chains"]),
-            draws=int(cfg["draws"]),
-            tune=int(cfg["tune"]),
-            target_accept=target_accept,
-            random_seed=random_seed + attempt_no - 1,
-            fast_mode=False,
+        seed = random_seed + attempt_no - 1
+        key = fingerprint(
+            returns, variant=variant, model_version=MODEL_VERSION,
+            target_accept=target_accept, seed=seed, config=cfg,
         )
+        trace = (
+            load_attempt(attempt_checkpoint_dir, key)
+            if attempt_checkpoint_dir is not None else None
+        )
+        if trace is not None:
+            diagnostics = _structural_diagnostics(trace, int(cfg["chains"]))
+            fit = {
+                "trace": trace, **diagnostics, "variant": variant,
+                "T": len(returns), "mean_return": float(np.mean(returns)),
+                "model_version": MODEL_VERSION, "chains": int(cfg["chains"]),
+                "draws": int(cfg["draws"]), "tune": int(cfg["tune"]),
+            }
+        else:
+            fit = fit_sv(
+                returns,
+                variant=variant,
+                chains=int(cfg["chains"]),
+                draws=int(cfg["draws"]),
+                tune=int(cfg["tune"]),
+                target_accept=target_accept,
+                random_seed=seed,
+                fast_mode=False,
+            )
+            if attempt_checkpoint_dir is not None:
+                save_attempt(attempt_checkpoint_dir, key, fit)
         records.append({
             "attempt": attempt_no,
             "chains": int(cfg["chains"]),
