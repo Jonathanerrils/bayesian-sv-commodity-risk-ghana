@@ -14,6 +14,8 @@ env:
   PRIOR_RECOVERY_RUN_ID: "38318956529"
   SECOND_RECOVERY_RUN_ID: "38913509318"
   THIRD_RECOVERY_RUN_ID: "39239545647"
+  # Optional completed run containing checkpoint artifact(s) from this branch.
+  CHECKPOINT_SOURCE_RUN_ID: ""
   # A checkpoint artifact must contain a verified, resumable sampler state.
   # Partial CSV output alone cannot resume an interrupted MCMC fit.
   SOURCE_HEAD_SHA: "f121fc79a203a8712ac0efb1310dccd438e0b614"
@@ -131,13 +133,30 @@ jobs:
           cache: pip
       - run: python -m pip install --upgrade pip
       - run: pip install -r requirements.txt
+      - name: Restore completed-attempt checkpoints from previous run
+        if: ${{ env.CHECKPOINT_SOURCE_RUN_ID != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p attempt_checkpoints
+          gh run download "$CHECKPOINT_SOURCE_RUN_ID" \
+            --pattern "attempt-checkpoints-*" -D restored_checkpoints
+          find restored_checkpoints -type f -name '*.nc' -exec cp -n {} attempt_checkpoints/ \;
       - run: |
           python scripts/run_production_shard.py \
             --kind sv --commodity "${{ matrix.commodity }}" --model "${{ matrix.model }}" \
             --start-block "${{ matrix.start_block }}" --n-blocks 1 \
             --window "$WINDOW" --refit-every "$REFIT_EVERY" \
             --predictive-draws "$PREDICTIVE_DRAWS" --target-accept "$TARGET_ACCEPT" \
-            --output-dir residual_shards
+            --output-dir residual_shards \\
+            --attempt-checkpoint-dir attempt_checkpoints
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: attempt-checkpoints-${{ matrix.commodity }}-${{ matrix.model }}-${{ matrix.start_block }}
+          path: attempt_checkpoints/*.nc
+          if-no-files-found: warn
+          retention-days: 30
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -164,13 +183,30 @@ jobs:
           cache: pip
       - run: python -m pip install --upgrade pip
       - run: pip install -r requirements.txt
+      - name: Restore completed-attempt checkpoints from previous run
+        if: ${{ env.CHECKPOINT_SOURCE_RUN_ID != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p attempt_checkpoints
+          gh run download "$CHECKPOINT_SOURCE_RUN_ID" \
+            --pattern "attempt-checkpoints-*" -D restored_checkpoints
+          find restored_checkpoints -type f -name '*.nc' -exec cp -n {} attempt_checkpoints/ \;
       - run: |
           python scripts/run_production_shard.py \
             --kind sv --commodity "${{ matrix.commodity }}" --model "${{ matrix.model }}" \
             --start-block "${{ matrix.start_block }}" --n-blocks 1 \
             --window "$WINDOW" --refit-every "$REFIT_EVERY" \
             --predictive-draws "$PREDICTIVE_DRAWS" --target-accept "$TARGET_ACCEPT" \
-            --output-dir residual_shards
+            --output-dir residual_shards \\
+            --attempt-checkpoint-dir attempt_checkpoints
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: attempt-checkpoints-${{ matrix.commodity }}-${{ matrix.model }}-${{ matrix.start_block }}
+          path: attempt_checkpoints/*.nc
+          if-no-files-found: warn
+          retention-days: 30
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -197,13 +233,30 @@ jobs:
           cache: pip
       - run: python -m pip install --upgrade pip
       - run: pip install -r requirements.txt
+      - name: Restore completed-attempt checkpoints from previous run
+        if: ${{ env.CHECKPOINT_SOURCE_RUN_ID != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p attempt_checkpoints
+          gh run download "$CHECKPOINT_SOURCE_RUN_ID" \
+            --pattern "attempt-checkpoints-*" -D restored_checkpoints
+          find restored_checkpoints -type f -name '*.nc' -exec cp -n {} attempt_checkpoints/ \;
       - run: |
           python scripts/run_production_shard.py \
             --kind sv --commodity "${{ matrix.commodity }}" --model "${{ matrix.model }}" \
             --start-block "${{ matrix.start_block }}" --n-blocks 1 \
             --window "$WINDOW" --refit-every "$REFIT_EVERY" \
             --predictive-draws "$PREDICTIVE_DRAWS" --target-accept "$TARGET_ACCEPT" \
-            --output-dir residual_shards
+            --output-dir residual_shards \\
+            --attempt-checkpoint-dir attempt_checkpoints
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: attempt-checkpoints-${{ matrix.commodity }}-${{ matrix.model }}-${{ matrix.start_block }}
+          path: attempt_checkpoints/*.nc
+          if-no-files-found: warn
+          retention-days: 30
       - uses: actions/upload-artifact@v4
         if: always()
         with:
