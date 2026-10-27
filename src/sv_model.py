@@ -419,6 +419,9 @@ def fit_sv_adaptive(
             if attempt_checkpoint_dir is not None else None
         )
         if trace is not None:
+            if (trace.posterior.sizes.get("chain") != int(cfg["chains"])
+                    or trace.posterior.sizes.get("draw") != int(cfg["draws"])):
+                raise ValueError("Completed-attempt checkpoint does not match configured chains/draws")
             diagnostics = _structural_diagnostics(trace, int(cfg["chains"]))
             fit = {
                 "trace": trace, **diagnostics, "variant": variant,
