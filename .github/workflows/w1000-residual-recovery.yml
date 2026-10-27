@@ -152,7 +152,7 @@ jobs:
             --start-block "${{ matrix.start_block }}" --n-blocks 1 \
             --window "$WINDOW" --refit-every "$REFIT_EVERY" \
             --predictive-draws "$PREDICTIVE_DRAWS" --target-accept "$TARGET_ACCEPT" \
-            --output-dir residual_shards \\
+            --output-dir residual_shards \
             --attempt-checkpoint-dir attempt_checkpoints
       - uses: actions/upload-artifact@v4
         if: always()
@@ -213,7 +213,7 @@ jobs:
             --start-block "${{ matrix.start_block }}" --n-blocks 1 \
             --window "$WINDOW" --refit-every "$REFIT_EVERY" \
             --predictive-draws "$PREDICTIVE_DRAWS" --target-accept "$TARGET_ACCEPT" \
-            --output-dir residual_shards \\
+            --output-dir residual_shards \
             --attempt-checkpoint-dir attempt_checkpoints
       - uses: actions/upload-artifact@v4
         if: always()
@@ -274,7 +274,7 @@ jobs:
             --start-block "${{ matrix.start_block }}" --n-blocks 1 \
             --window "$WINDOW" --refit-every "$REFIT_EVERY" \
             --predictive-draws "$PREDICTIVE_DRAWS" --target-accept "$TARGET_ACCEPT" \
-            --output-dir residual_shards \\
+            --output-dir residual_shards \
             --attempt-checkpoint-dir attempt_checkpoints
       - uses: actions/upload-artifact@v4
         if: always()
