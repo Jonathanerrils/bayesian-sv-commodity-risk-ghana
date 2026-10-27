@@ -57,3 +57,27 @@ def test_missing_divergence_diagnostics_fails_closed(tmp_path):
     assert save_attempt(tmp_path, "missing", {"trace": trace})
     with pytest.raises(RuntimeError, match="Invalid completed-attempt checkpoint"):
         load_attempt(tmp_path, "missing")
+
+
+def test_schema_mismatch_fails_closed(tmp_path):
+    trace = az.from_dict(
+        posterior={"mu": np.ones((2, 4))},
+        sample_stats={"diverging": np.zeros((2, 4), dtype=bool)},
+    )
+    trace.attrs["attempt_checkpoint_key"] = "legacy"
+    trace.attrs["checkpoint_schema_version"] = "0"
+    az.to_netcdf(trace, str(tmp_path / "legacy.nc"))
+    with pytest.raises(RuntimeError, match="Invalid completed-attempt checkpoint"):
+        load_attempt(tmp_path, "legacy")
+
+
+def test_mismatched_sample_dimensions_fail_closed(tmp_path):
+    trace = az.from_dict(
+        posterior={"mu": np.ones((2, 4))},
+        sample_stats={"diverging": np.zeros((2, 3), dtype=bool)},
+    )
+    trace.attrs["attempt_checkpoint_key"] = "mismatch"
+    trace.attrs["checkpoint_schema_version"] = "1"
+    az.to_netcdf(trace, str(tmp_path / "mismatch.nc"))
+    with pytest.raises(RuntimeError, match="Invalid completed-attempt checkpoint"):
+        load_attempt(tmp_path, "mismatch")
