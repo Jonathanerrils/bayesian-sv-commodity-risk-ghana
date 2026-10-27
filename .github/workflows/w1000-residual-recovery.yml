@@ -112,7 +112,7 @@ jobs:
             residual_matrix.json
             normalized_combined_sv/
             combined_input/
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 30
 
   recover_cocoa:
@@ -142,8 +142,12 @@ jobs:
           gh run download "$CHECKPOINT_SOURCE_RUN_ID" \
             --pattern "attempt-checkpoints-*" -D restored_checkpoints
           find restored_checkpoints -type f -name '*.nc' -exec cp -n {} attempt_checkpoints/ \;
-      - run: |
-          python scripts/run_production_shard.py \
+      - name: Run bounded recovery with checkpoint-upload reserve
+        id: bounded_recovery
+        continue-on-error: true
+        run: |
+          timeout --signal=TERM --kill-after=60s 300m \
+            python scripts/run_production_shard.py \
             --kind sv --commodity "${{ matrix.commodity }}" --model "${{ matrix.model }}" \
             --start-block "${{ matrix.start_block }}" --n-blocks 1 \
             --window "$WINDOW" --refit-every "$REFIT_EVERY" \
@@ -157,12 +161,19 @@ jobs:
           path: attempt_checkpoints/*.nc
           if-no-files-found: warn
           retention-days: 30
+      - name: Report bounded recovery result
+        if: always()
+        run: |
+          if [[ "${{ steps.bounded_recovery.outcome }}" != "success" ]]; then
+            echo "Recovery incomplete; completed checkpoints may be available in this run." >&2
+            exit 1
+          fi
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: residual-sv-cocoa-${{ matrix.model }}-${{ matrix.start_block }}
           path: residual_shards/
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 30
 
   recover_gold:
@@ -192,8 +203,12 @@ jobs:
           gh run download "$CHECKPOINT_SOURCE_RUN_ID" \
             --pattern "attempt-checkpoints-*" -D restored_checkpoints
           find restored_checkpoints -type f -name '*.nc' -exec cp -n {} attempt_checkpoints/ \;
-      - run: |
-          python scripts/run_production_shard.py \
+      - name: Run bounded recovery with checkpoint-upload reserve
+        id: bounded_recovery
+        continue-on-error: true
+        run: |
+          timeout --signal=TERM --kill-after=60s 300m \
+            python scripts/run_production_shard.py \
             --kind sv --commodity "${{ matrix.commodity }}" --model "${{ matrix.model }}" \
             --start-block "${{ matrix.start_block }}" --n-blocks 1 \
             --window "$WINDOW" --refit-every "$REFIT_EVERY" \
@@ -207,12 +222,19 @@ jobs:
           path: attempt_checkpoints/*.nc
           if-no-files-found: warn
           retention-days: 30
+      - name: Report bounded recovery result
+        if: always()
+        run: |
+          if [[ "${{ steps.bounded_recovery.outcome }}" != "success" ]]; then
+            echo "Recovery incomplete; completed checkpoints may be available in this run." >&2
+            exit 1
+          fi
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: residual-sv-gold-${{ matrix.model }}-${{ matrix.start_block }}
           path: residual_shards/
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 30
 
   recover_oil:
@@ -242,8 +264,12 @@ jobs:
           gh run download "$CHECKPOINT_SOURCE_RUN_ID" \
             --pattern "attempt-checkpoints-*" -D restored_checkpoints
           find restored_checkpoints -type f -name '*.nc' -exec cp -n {} attempt_checkpoints/ \;
-      - run: |
-          python scripts/run_production_shard.py \
+      - name: Run bounded recovery with checkpoint-upload reserve
+        id: bounded_recovery
+        continue-on-error: true
+        run: |
+          timeout --signal=TERM --kill-after=60s 300m \
+            python scripts/run_production_shard.py \
             --kind sv --commodity "${{ matrix.commodity }}" --model "${{ matrix.model }}" \
             --start-block "${{ matrix.start_block }}" --n-blocks 1 \
             --window "$WINDOW" --refit-every "$REFIT_EVERY" \
@@ -257,6 +283,13 @@ jobs:
           path: attempt_checkpoints/*.nc
           if-no-files-found: warn
           retention-days: 30
+      - name: Report bounded recovery result
+        if: always()
+        run: |
+          if [[ "${{ steps.bounded_recovery.outcome }}" != "success" ]]; then
+            echo "Recovery incomplete; completed checkpoints may be available in this run." >&2
+            exit 1
+          fi
       - uses: actions/upload-artifact@v4
         if: always()
         with:
