@@ -2,6 +2,12 @@ name: w1000-residual-recovery
 
 on:
   workflow_dispatch:
+    inputs:
+      checkpoint_source_run_id:
+        description: "Completed workflow run ID containing matching attempt-checkpoint artifacts (optional)"
+        required: false
+        type: string
+        default: ""
   pull_request:
     types: [labeled]
 
@@ -15,7 +21,7 @@ env:
   SECOND_RECOVERY_RUN_ID: "38913509318"
   THIRD_RECOVERY_RUN_ID: "39239545647"
   # Optional completed run containing checkpoint artifact(s) from this branch.
-  CHECKPOINT_SOURCE_RUN_ID: ""
+  CHECKPOINT_SOURCE_RUN_ID: ${{ inputs.checkpoint_source_run_id || '' }}
   # Checkpoints represent completed attempts, not resumable in-flight NUTS chains.
   SOURCE_HEAD_SHA: "f121fc79a203a8712ac0efb1310dccd438e0b614"
   WINDOW: "1000"
