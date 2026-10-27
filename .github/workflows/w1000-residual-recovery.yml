@@ -14,6 +14,8 @@ env:
   PRIOR_RECOVERY_RUN_ID: "38318956529"
   SECOND_RECOVERY_RUN_ID: "38913509318"
   THIRD_RECOVERY_RUN_ID: "39239545647"
+  # A checkpoint artifact must contain a verified, resumable sampler state.
+  # Partial CSV output alone cannot resume an interrupted MCMC fit.
   SOURCE_HEAD_SHA: "f121fc79a203a8712ac0efb1310dccd438e0b614"
   WINDOW: "1000"
   REFIT_EVERY: "42"
