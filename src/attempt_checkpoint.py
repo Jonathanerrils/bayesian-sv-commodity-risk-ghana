@@ -8,6 +8,7 @@ from pathlib import Path
 
 import arviz as az
 import numpy as np
+import pymc as pm
 
 
 def fingerprint(returns, *, variant, model_version, target_accept, seed, config):
@@ -18,6 +19,8 @@ def fingerprint(returns, *, variant, model_version, target_accept, seed, config)
         "config": {k: int(config[k]) for k in ("chains", "draws", "tune")},
         "data_sha256": hashlib.sha256(values.tobytes()).hexdigest(),
         "data_length": int(values.size),
+        "pymc_version": pm.__version__,
+        "arviz_version": az.__version__,
     }
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
@@ -51,6 +54,14 @@ def load_attempt(directory: Path, key: str):
             raise ValueError("Checkpoint fingerprint mismatch")
         if "posterior" not in trace.groups() or "sample_stats" not in trace.groups():
             raise ValueError("Checkpoint missing posterior or sampling diagnostics")
+        posterior = trace.posterior
+        stats = trace.sample_stats
+        if not posterior.data_vars or "diverging" not in stats:
+            raise ValueError("Checkpoint missing structural samples or divergence diagnostics")
+        if posterior.sizes.get("chain", 0) < 1 or posterior.sizes.get("draw", 0) < 1:
+            raise ValueError("Checkpoint contains no posterior draws")
+        if stats.sizes.get("chain") != posterior.sizes["chain"] or stats.sizes.get("draw") != posterior.sizes["draw"]:
+            raise ValueError("Checkpoint diagnostic dimensions disagree with posterior")
         return trace
     except Exception as exc:
         raise RuntimeError(f"Invalid completed-attempt checkpoint: {path}") from exc
