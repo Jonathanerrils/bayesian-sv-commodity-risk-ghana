@@ -16,8 +16,7 @@ env:
   THIRD_RECOVERY_RUN_ID: "39239545647"
   # Optional completed run containing checkpoint artifact(s) from this branch.
   CHECKPOINT_SOURCE_RUN_ID: ""
-  # A checkpoint artifact must contain a verified, resumable sampler state.
-  # Partial CSV output alone cannot resume an interrupted MCMC fit.
+  # Checkpoints represent completed attempts, not resumable in-flight NUTS chains.
   SOURCE_HEAD_SHA: "f121fc79a203a8712ac0efb1310dccd438e0b614"
   WINDOW: "1000"
   REFIT_EVERY: "42"
@@ -140,8 +139,8 @@ jobs:
         run: |
           mkdir -p attempt_checkpoints
           gh run download "$CHECKPOINT_SOURCE_RUN_ID" \
-            --pattern "attempt-checkpoints-*" -D restored_checkpoints
-          find restored_checkpoints -type f -name '*.nc' -exec cp -n {} attempt_checkpoints/ \;
+            --pattern "attempt-checkpoints-${{ matrix.commodity }}-${{ matrix.model }}-${{ matrix.start_block }}" \
+            -D attempt_checkpoints
       - name: Run bounded recovery with checkpoint-upload reserve
         id: bounded_recovery
         continue-on-error: true
@@ -201,8 +200,8 @@ jobs:
         run: |
           mkdir -p attempt_checkpoints
           gh run download "$CHECKPOINT_SOURCE_RUN_ID" \
-            --pattern "attempt-checkpoints-*" -D restored_checkpoints
-          find restored_checkpoints -type f -name '*.nc' -exec cp -n {} attempt_checkpoints/ \;
+            --pattern "attempt-checkpoints-${{ matrix.commodity }}-${{ matrix.model }}-${{ matrix.start_block }}" \
+            -D attempt_checkpoints
       - name: Run bounded recovery with checkpoint-upload reserve
         id: bounded_recovery
         continue-on-error: true
@@ -262,8 +261,8 @@ jobs:
         run: |
           mkdir -p attempt_checkpoints
           gh run download "$CHECKPOINT_SOURCE_RUN_ID" \
-            --pattern "attempt-checkpoints-*" -D restored_checkpoints
-          find restored_checkpoints -type f -name '*.nc' -exec cp -n {} attempt_checkpoints/ \;
+            --pattern "attempt-checkpoints-${{ matrix.commodity }}-${{ matrix.model }}-${{ matrix.start_block }}" \
+            -D attempt_checkpoints
       - name: Run bounded recovery with checkpoint-upload reserve
         id: bounded_recovery
         continue-on-error: true
