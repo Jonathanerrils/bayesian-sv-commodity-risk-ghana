@@ -74,8 +74,11 @@ def test_schema_mismatch_fails_closed(tmp_path):
 def test_mismatched_sample_dimensions_fail_closed(tmp_path):
     trace = az.from_dict(
         posterior={"mu": np.ones((2, 4))},
-        sample_stats={"diverging": np.zeros((2, 3), dtype=bool)},
+        sample_stats={"diverging": np.zeros((2, 4), dtype=bool)},
     )
+    # Modify the diagnostic group after construction: ArviZ may reject
+    # inconsistent chain/draw dimensions during from_dict itself.
+    trace.sample_stats = trace.sample_stats.isel(draw=slice(0, 3))
     trace.attrs["attempt_checkpoint_key"] = "mismatch"
     trace.attrs["checkpoint_schema_version"] = "1"
     az.to_netcdf(trace, str(tmp_path / "mismatch.nc"))
