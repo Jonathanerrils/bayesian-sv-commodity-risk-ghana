@@ -159,6 +159,7 @@ def run_sv_shard(
     output_dir: Path,
     random_seed: int = DEFAULT_RANDOM_SEED,
     target_accept: float = DEFAULT_TARGET_ACCEPT,
+    attempt_checkpoint_dir: Path | None = None,
 ) -> Path:
     returns = load_all_returns(verbose=False)[commodity]
     ret_array = returns.to_numpy(dtype=float)
@@ -191,6 +192,7 @@ def run_sv_shard(
             target_accept=target_accept,
             random_seed=random_seed + block_start,
             attempts=DEFAULT_ROLLING_MCMC_ATTEMPTS,
+            attempt_checkpoint_dir=attempt_checkpoint_dir,
         )
 
         if not fit.get("converged", False):
@@ -285,6 +287,8 @@ def main() -> None:
     parser.add_argument("--predictive-draws", type=int, default=DEFAULT_PREDICTIVE_DRAWS)
     parser.add_argument("--target-accept", type=float, default=DEFAULT_TARGET_ACCEPT)
     parser.add_argument("--output-dir", type=Path, default=PROJECT_ROOT / "production_shards")
+    parser.add_argument("--attempt-checkpoint-dir", type=Path, default=None,
+                        help="Directory for validated completed-MCMC-attempt checkpoints")
     args = parser.parse_args()
     if not (0.0 < args.target_accept < 1.0):
         parser.error("--target-accept must lie strictly between 0 and 1")
@@ -300,6 +304,7 @@ def main() -> None:
             args.commodity, args.model, args.start_block, args.n_blocks,
             args.window, args.refit_every, args.predictive_draws, args.output_dir,
             target_accept=args.target_accept,
+            attempt_checkpoint_dir=args.attempt_checkpoint_dir,
         )
     print(f"Wrote production shard: {path}")
 
