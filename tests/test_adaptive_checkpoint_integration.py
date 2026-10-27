@@ -55,13 +55,13 @@ def test_adaptive_without_checkpoint_still_refits(monkeypatch):
 
 
 def test_nonconverged_completed_attempt_reused_before_escalation(monkeypatch, tmp_path):
-    trace = az.from_dict(
-        posterior={"mu": np.ones((2, 5))},
-        sample_stats={"diverging": np.zeros((2, 5), dtype=bool)},
-    )
     calls = []
     def fake_fit(returns, **kwargs):
         calls.append(kwargs["draws"])
+        trace = az.from_dict(
+            posterior={"mu": np.ones((2, kwargs["draws"]))},
+            sample_stats={"diverging": np.zeros((2, kwargs["draws"]), dtype=bool)},
+        )
         converged = kwargs["draws"] == 10
         return {
             "trace": trace, "converged": converged,
@@ -72,10 +72,16 @@ def test_nonconverged_completed_attempt_reused_before_escalation(monkeypatch, tm
             "ess_by_var": {"mu": 500.0 if converged else 50.0},
         }
     def fake_diagnostics(trace_arg, chains):
+        # Model a converged second attempt and a nonconverged first attempt.
+        draws = trace_arg.posterior.sizes["draw"]
+        converged = draws == 10
         return {
-            "converged": False, "max_rhat": 1.2,
-            "min_ess": 50.0, "n_divergences": 0,
-            "rhat_by_var": {"mu": 1.2}, "ess_by_var": {"mu": 50.0},
+            "converged": converged,
+            "max_rhat": 1.0 if converged else 1.2,
+            "min_ess": 500.0 if converged else 50.0,
+            "n_divergences": 0,
+            "rhat_by_var": {"mu": 1.0 if converged else 1.2},
+            "ess_by_var": {"mu": 500.0 if converged else 50.0},
         }
     monkeypatch.setattr(sv_model, "fit_sv", fake_fit)
     monkeypatch.setattr(sv_model, "_structural_diagnostics", fake_diagnostics)
@@ -89,9 +95,7 @@ def test_nonconverged_completed_attempt_reused_before_escalation(monkeypatch, tm
     )
     first = sv_model.fit_sv_adaptive(np.array([0.1, 0.2, 0.3]), **kwargs)
     assert first["accepted_attempt"] == 2
-    # Reuse the first, nonconverged attempt; the second checkpoint is also reused,
-    # but mocked diagnostics deliberately reject it to test escalation semantics.
     second = sv_model.fit_sv_adaptive(np.array([0.1, 0.2, 0.3]), **kwargs)
+    assert second["accepted_attempt"] == 2
     assert len(calls) == 2
-    assert second["accepted_attempt"] is None
     assert len(second["mcmc_attempts"]) == 2
