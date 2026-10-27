@@ -99,3 +99,28 @@ def test_nonconverged_completed_attempt_reused_before_escalation(monkeypatch, tm
     assert second["accepted_attempt"] == 2
     assert len(calls) == 2
     assert len(second["mcmc_attempts"]) == 2
+
+
+def test_rejects_checkpoint_with_wrong_draw_count(monkeypatch, tmp_path):
+    import pytest
+    from attempt_checkpoint import fingerprint, save_attempt
+    config = {"chains": 2, "draws": 10, "tune": 5}
+    values = np.array([0.1, 0.2, 0.3])
+    key = fingerprint(
+        values, variant="SV-t", model_version=sv_model.MODEL_VERSION,
+        target_accept=0.99, seed=7, config=config,
+    )
+    incorrect = az.from_dict(
+        posterior={"mu": np.ones((2, 5))},
+        sample_stats={"diverging": np.zeros((2, 5), dtype=bool)},
+    )
+    assert save_attempt(tmp_path, key, {"trace": incorrect})
+    monkeypatch.setattr(
+        sv_model, "fit_sv",
+        lambda *args, **kwargs: pytest.fail("Must not fit with invalid cached trace"),
+    )
+    with pytest.raises(ValueError, match="configured chains/draws"):
+        sv_model.fit_sv_adaptive(
+            values, variant="SV-t", target_accept=0.99, random_seed=7,
+            attempts=(config,), attempt_checkpoint_dir=tmp_path,
+        )
