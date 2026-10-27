@@ -31,7 +31,9 @@ def save_attempt(directory: Path, key: str, fit: dict):
     target = directory / (key + ".nc")
     temp = directory / (key + ".partial.nc")
     try:
-        az.to_netcdf(fit["trace"], str(temp))
+        trace = fit["trace"].copy()
+        trace.attrs["attempt_checkpoint_key"] = key
+        az.to_netcdf(trace, str(temp))
         os.replace(temp, target)
     finally:
         temp.unlink(missing_ok=True)
@@ -44,6 +46,11 @@ def load_attempt(directory: Path, key: str):
     if not path.is_file():
         return None
     try:
-        return az.from_netcdf(str(path))
+        trace = az.from_netcdf(str(path))
+        if trace.attrs.get("attempt_checkpoint_key") != key:
+            raise ValueError("Checkpoint fingerprint mismatch")
+        if "posterior" not in trace.groups() or "sample_stats" not in trace.groups():
+            raise ValueError("Checkpoint missing posterior or sampling diagnostics")
+        return trace
     except Exception as exc:
         raise RuntimeError(f"Invalid completed-attempt checkpoint: {path}") from exc
