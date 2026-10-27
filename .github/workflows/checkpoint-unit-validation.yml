@@ -28,4 +28,4 @@ jobs:
           python -m py_compile src/attempt_checkpoint.py src/sv_model.py scripts/run_production_shard.py
       - name: Run checkpoint unit tests
         run: |
-          python -m pytest -q tests/test_attempt_checkpoint.py
+          python -m pytest -q tests/test_attempt_checkpoint.py tests/test_adaptive_checkpoint_integration.py
