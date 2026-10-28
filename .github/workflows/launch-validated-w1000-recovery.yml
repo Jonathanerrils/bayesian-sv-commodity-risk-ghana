@@ -1,0 +1,18 @@
+name: Launch validated W1000 residual recovery
+run-name: Validated W1000 recovery (15 missing blocks)
+on:
+  workflow_dispatch:
+    inputs:
+      checkpoint_source_run_id:
+        description: "Optional prior checkpoint-enabled recovery run ID (leave blank for first run)"
+        required: false
+        type: string
+        default: ""
+permissions:
+  contents: read
+  actions: read
+jobs:
+  recover:
+    uses: Jonathanerrils/bayesian-sv-commodity-risk-ghana/.github/workflows/w1000-residual-recovery.yml@audit-fix/residual-recovery-third-wave
+    with:
+      checkpoint_source_run_id: ${{ inputs.checkpoint_source_run_id }}
