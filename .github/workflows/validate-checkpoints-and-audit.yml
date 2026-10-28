@@ -1,0 +1,91 @@
+name: validate-checkpoints-and-consolidated-audit
+on:
+  push:
+    branches:
+      - audit-fix/residual-recovery-third-wave
+    paths:
+      - .github/workflows/validate-checkpoints-and-audit.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: python -m pip install -r requirements.txt
+      - name: Unit checkpoint tests (no model sampling)
+        run: python -m pytest -q tests/test_attempt_checkpoint.py
+      - name: Cross-process save/restore checkpoint integration
+        run: |
+          mkdir -p /tmp/sv-checkpoint-transfer
+          PYTHONPATH=src python - <<'PY'
+          import numpy as np, arviz as az
+          from pathlib import Path
+          from attempt_checkpoint import fingerprint, save_attempt
+          x=np.array([0.1,0.2,0.3])
+          key=fingerprint(x,variant='SV-t',model_version='v1',target_accept=0.99,seed=42,config=dict(chains=2,draws=4,tune=4))
+          trace=az.from_dict(posterior={'mu':np.ones((2,4))},sample_stats={'diverging':np.zeros((2,4),dtype=bool)})
+          assert save_attempt(Path('/tmp/sv-checkpoint-transfer'),key,{'trace':trace})
+          Path('/tmp/sv-checkpoint-key').write_text(key)
+          PY
+          mkdir -p /tmp/sv-checkpoint-restored
+          cp /tmp/sv-checkpoint-transfer/*.nc /tmp/sv-checkpoint-restored/
+          PYTHONPATH=src python - <<'PY'
+          from pathlib import Path
+          from attempt_checkpoint import load_attempt
+          key=Path('/tmp/sv-checkpoint-key').read_text()
+          trace=load_attempt(Path('/tmp/sv-checkpoint-restored'),key)
+          assert trace is not None and trace.posterior.sizes['chain']==2 and trace.posterior.sizes['draw']==4
+          print('Cross-process checkpoint save/copy/restore PASS')
+          PY
+      - name: Download prior validated evidence (no model sampling)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p audit_input/prior audit_input/latest previous_package latest_artifacts
+          gh run download 39239545647 --name residual-source-package -D previous_package
+          gh run download 39239545647 --pattern 'residual-sv-*' -D latest_artifacts
+          cp previous_package/production_plan.json production_plan.json
+          find previous_package/normalized_combined_sv -type f -name 'sv__*.csv' -exec cp {} audit_input/prior/ \;
+          find latest_artifacts -type f -name 'sv__*.csv' -exec cp {} audit_input/latest/ \;
+      - name: Run canonical audit and enforce expected classifications
+        run: |
+          python scripts/audit_production_recovery.py \
+            --plan production_plan.json \
+            --input-dir audit_input \
+            --audit-json canonical_audit.json \
+            --recovery-json canonical_recovery_matrix.json \
+            --source-run-id 37871158815 \
+            --source-head-sha f121fc79a203a8712ac0efb1310dccd438e0b614 \
+            --refit-every 42 --target-accept 0.99 \
+            --filter-resample-threshold 0.5 \
+            --backfill-filter-threshold \
+            --backfill-validated-source-sha f121fc79a203a8712ac0efb1310dccd438e0b614
+          python - <<'PY'
+          import json
+          a=json.load(open('canonical_audit.json'))
+          print('Canonical counts:',a['counts'])
+          expected={'complete':576,'statistical-failure':71,'infrastructure-missing':15}
+          assert all(a['counts'].get(k,0)==v for k,v in expected.items()),a['counts']
+          assert a['safe_for_automatic_recovery'] is True
+          assert not a['duplicate_conflicts']
+          matrix=json.load(open('canonical_recovery_matrix.json'))
+          assert sum(len(v) for v in matrix.values())==15
+          print('Canonical audit PASS; exactly 15 missing blocks')
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: checkpoint-validation-canonical-audit
+          path: |
+            canonical_audit.json
+            canonical_recovery_matrix.json
+          if-no-files-found: warn
+          retention-days: 30
