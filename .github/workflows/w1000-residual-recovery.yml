@@ -8,6 +8,12 @@ on:
         required: false
         type: string
         default: ""
+  workflow_call:
+    inputs:
+      checkpoint_source_run_id:
+        type: string
+        required: false
+        default: ''
   pull_request:
     types: [labeled]
 
@@ -33,7 +39,7 @@ env:
 
 jobs:
   audit_combined:
-    if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'run-w1000-residual-recovery'
+    if: (github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_call') || github.event.label.name == 'run-w1000-residual-recovery'
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     outputs:
@@ -45,6 +51,8 @@ jobs:
       has_oil: ${{ steps.audit.outputs.has_oil }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: audit-fix/residual-recovery-third-wave
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -132,6 +140,8 @@ jobs:
         include: ${{ fromJSON(needs.audit_combined.outputs.recovery_cocoa) }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: audit-fix/residual-recovery-third-wave
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -201,6 +211,8 @@ jobs:
         include: ${{ fromJSON(needs.audit_combined.outputs.recovery_gold) }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: audit-fix/residual-recovery-third-wave
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -270,6 +282,8 @@ jobs:
         include: ${{ fromJSON(needs.audit_combined.outputs.recovery_oil) }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: audit-fix/residual-recovery-third-wave
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
